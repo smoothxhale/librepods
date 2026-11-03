@@ -83,10 +83,10 @@ const CALIBRATION_SAMPLES: usize = 10;
 const Q15_SCALE: f32 = 32768.0;
 
 /// Head orientation in degrees relative to the calibrated neutral position:
-/// yaw = turning the head, pitch = nodding, roll = tilting toward a shoulder,
-/// each positive toward the wearer's right. The earbud sensor's frame is
-/// rotated against the head (its z axis follows the nod, its y axis the turn)
-/// and mirrored on every axis; `process` converts it. Mapping confirmed by
+/// yaw = turning the head (positive to the wearer's right), pitch = nodding
+/// (positive up), roll = tilting toward a shoulder (positive to the right).
+/// The earbud sensor's frame is rotated against the head (its z axis follows
+/// the nod, its y axis the turn); `process` converts it. Mapping confirmed by
 /// observation on AirPods 4.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HeadPose {
@@ -219,9 +219,9 @@ impl HeadTracker {
         let (sensor_yaw, sensor_pitch, sensor_roll) = neutral.conjugate().mul(q).euler_degrees();
         let accel = |offset| report_i16(packet, offset).map_or(0.0, f32::from);
         self.pose = Some(HeadPose {
-            yaw: -sensor_pitch,
+            yaw: sensor_pitch,
             pitch: -sensor_yaw,
-            roll: -sensor_roll,
+            roll: sensor_roll,
             horizontal_accel: accel(HORIZONTAL_ACCEL_OFFSET),
             vertical_accel: accel(VERTICAL_ACCEL_OFFSET),
         });
@@ -329,7 +329,7 @@ mod tests {
         let mut tracker = calibrated(neutral);
         tracker.process(&report(81, neutral.mul(rotation(-20.0, 0.0, 1.0, 0.0))));
         let pose = tracker.pose().unwrap();
-        assert!((pose.yaw - 20.0).abs() < 0.1, "yaw {}", pose.yaw);
+        assert!((pose.yaw + 20.0).abs() < 0.1, "yaw {}", pose.yaw);
         assert!(pose.pitch.abs() < 0.1 && pose.roll.abs() < 0.1, "{pose:?}");
     }
 
@@ -339,7 +339,7 @@ mod tests {
         let mut tracker = calibrated(neutral);
         tracker.process(&report(81, neutral.mul(rotation(15.0, 1.0, 0.0, 0.0))));
         let pose = tracker.pose().unwrap();
-        assert!((pose.roll + 15.0).abs() < 0.1, "roll {}", pose.roll);
+        assert!((pose.roll - 15.0).abs() < 0.1, "roll {}", pose.roll);
         assert!(pose.yaw.abs() < 0.1 && pose.pitch.abs() < 0.1, "{pose:?}");
     }
 
