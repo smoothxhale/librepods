@@ -78,15 +78,23 @@ impl Drop for VirtualMic {
 const MUTE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Reads the PipeWire mute flag of the hi-res source over a persistent connection.
+/// Field order matters: fields drop in declaration order, and the context must be
+/// released before the mainloop it runs on.
 struct MuteWatch {
-    mainloop: Mainloop,
     context: Context,
+    mainloop: Mainloop,
+}
+
+impl Drop for MuteWatch {
+    fn drop(&mut self) {
+        self.context.disconnect();
+    }
 }
 
 impl MuteWatch {
     fn connect() -> Option<MuteWatch> {
         let (mainloop, context) = connect()?;
-        Some(MuteWatch { mainloop, context })
+        Some(MuteWatch { context, mainloop })
     }
 
     /// Current mute flag of the source, or None if it could not be read.
