@@ -13,11 +13,28 @@ use libpulse_binding::proplist::Proplist;
 use libpulse_binding::volume::{ChannelVolumes, Volume};
 use log::{debug, error, info, warn};
 use std::cell::RefCell;
-use std::process::Command;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+
+/// Bluetooth service class UUID of an A2DP audio sink (the headset side).
+const A2DP_SINK_UUID: uuid::Uuid = uuid::Uuid::from_u128(0x0000110b_0000_1000_8000_00805f9b34fb);
+/// How long to wait for the audio card after requesting the A2DP link.
+const A2DP_CONNECT_POLLS: u32 = 16;
+const A2DP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Ask BlueZ to connect the A2DP profile of the device with this address.
+async fn request_a2dp_connection(mac: &str) -> Result<(), String> {
+    let address: bluer::Address = mac.parse().map_err(|e| format!("bad address {mac}: {e}"))?;
+    let session = bluer::Session::new().await.map_err(|e| e.to_string())?;
+    let adapter = session.default_adapter().await.map_err(|e| e.to_string())?;
+    let device = adapter.device(address).map_err(|e| e.to_string())?;
+    device
+        .connect_profile(&A2DP_SINK_UUID)
+        .await
+        .map_err(|e| e.to_string())
+}
 
 #[derive(Clone, Debug)]
 struct OwnedCardProfileInfo {
@@ -318,7 +335,11 @@ impl MediaController {
 
         if current_device_index.is_none() {
             warn!("Device index not found, trying to get it.");
-            current_device_index = self.get_audio_device_index(&mac).await;
+            // The control link can come up before the audio link; ask BlueZ for it.
+            current_device_index = match self.get_audio_device_index(&mac).await {
+                Some(idx) => Some(idx),
+                None => self.connect_a2dp_link(&mac).await,
+            };
             if let Some(idx) = current_device_index {
                 self.state.lock().await.device_index = Some(idx);
             } else {
@@ -328,22 +349,16 @@ impl MediaController {
         }
 
         if !self.is_a2dp_profile_available().await {
-            warn!("A2DP profile not available, attempting to restart WirePlumber");
-            if self.restart_wire_plumber().await {
-                let mut state = self.state.lock().await;
-                state.device_index = self
-                    .get_audio_device_index(&state.connected_device_mac)
-                    .await;
-                debug!(
-                    "Updated device_index after WirePlumber restart: {:?}",
-                    state.device_index
-                );
-                if !self.is_a2dp_profile_available().await {
-                    error!("A2DP profile still not available after WirePlumber restart");
+            warn!("A2DP profile not available; asking BlueZ to connect the A2DP link");
+            match self.connect_a2dp_link(&mac).await {
+                Some(idx) => self.state.lock().await.device_index = Some(idx),
+                None => {
+                    error!("A2DP link could not be connected, A2DP profile unavailable");
                     return;
                 }
-            } else {
-                error!("Could not restart WirePlumber, A2DP profile unavailable");
+            }
+            if !self.is_a2dp_profile_available().await {
+                error!("A2DP profile still not available after connecting the A2DP link");
                 return;
             }
         }
@@ -597,23 +612,21 @@ impl MediaController {
             .unwrap_or(false)
     }
 
-    async fn restart_wire_plumber(&self) -> bool {
-        info!("Restarting WirePlumber to rediscover A2DP profiles");
-        let result = Command::new("systemctl")
-            .args(["--user", "restart", "wireplumber"])
-            .output();
-
-        match result {
-            Ok(output) if output.status.success() => {
-                info!("WirePlumber restarted successfully");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                true
-            }
-            _ => {
-                error!("Failed to restart WirePlumber. Do you use wireplumber?");
-                false
-            }
+    /// Ask BlueZ to connect the headset's A2DP link and wait for its audio card.
+    /// Returns the card index once it appears.
+    async fn connect_a2dp_link(&self, mac: &str) -> Option<u32> {
+        info!("Requesting the A2DP link for {} from BlueZ", mac);
+        if let Err(e) = request_a2dp_connection(mac).await {
+            warn!("BlueZ could not connect A2DP for {}: {}", mac, e);
         }
+        for _ in 0..A2DP_CONNECT_POLLS {
+            if let Some(idx) = self.get_audio_device_index(mac).await {
+                info!("A2DP link for {} is up (card {})", mac, idx);
+                return Some(idx);
+            }
+            tokio::time::sleep(A2DP_CONNECT_POLL_INTERVAL).await;
+        }
+        None
     }
 
     async fn get_audio_device_index(&self, mac: &str) -> Option<u32> {
