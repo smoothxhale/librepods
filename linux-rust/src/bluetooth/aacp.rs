@@ -1,3 +1,6 @@
+use crate::bluetooth::aacp_extras::{
+    CustomEq, HEAD_TRACKING_START, HEAD_TRACKING_STOP, HeadTracker,
+};
 use crate::devices::airpods::AirPodsInformation;
 use crate::devices::enums::{DeviceData, DeviceInformation, DeviceType};
 use crate::utils::get_devices_path;
@@ -60,6 +63,7 @@ pub mod opcodes {
     pub const SEND_CONNECTED_MAC: u8 = 0x14;
     pub const HEADTRACKING: u8 = 0x17;
     pub const TIPI_3: u8 = 0x0C;
+    pub const CUSTOM_EQ: u8 = 0x63;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -355,6 +359,10 @@ pub struct AACPManagerState {
     pub airpods_mac: Option<Address>,
     /// When set, recv_thread forwards raw 0x58 audio SDUs here (hi-res mic).
     pub audio_tx: Option<mpsc::Sender<Vec<u8>>>,
+    /// Last custom EQ reported by (or written to) the device.
+    pub custom_eq: Option<CustomEq>,
+    /// Present while head tracking is running.
+    pub head_tracker: Option<HeadTracker>,
 }
 
 impl AACPManagerState {
@@ -379,6 +387,8 @@ impl AACPManagerState {
             devices,
             airpods_mac: None,
             audio_tx: None,
+            custom_eq: None,
+            head_tracker: None,
         }
     }
 }
@@ -1072,6 +1082,20 @@ impl AACPManager {
             opcodes::EQ_DATA => {
                 debug!("Received EQ Data");
             }
+            opcodes::CUSTOM_EQ => match CustomEq::parse(packet) {
+                Some(eq) => {
+                    info!("Received Custom EQ: {:?}", eq);
+                    self.state.lock().await.custom_eq = Some(eq);
+                }
+                None => debug!("Received malformed Custom EQ: {}", hex::encode(packet)),
+            },
+            opcodes::HEADTRACKING => {
+                let mut state = self.state.lock().await;
+                match state.head_tracker.as_mut() {
+                    Some(tracker) => tracker.process(packet),
+                    None => debug!("Received head-tracking descriptor ({} bytes)", packet.len()),
+                }
+            }
             _ => debug!("Received unknown packet with opcode {:#04x}", opcode),
         }
     }
@@ -1148,6 +1172,24 @@ impl AACPManager {
         packet.push(0x00);
         packet.extend_from_slice(name_bytes);
         self.send_data_packet(&packet).await
+    }
+
+    /// Write the custom EQ and record it as the current value.
+    pub async fn send_custom_eq(&self, eq: CustomEq) -> Result<()> {
+        self.send_data_packet(&eq.to_packet()).await?;
+        self.state.lock().await.custom_eq = Some(eq);
+        Ok(())
+    }
+
+    /// Start the head-tracking sensor stream; the first reports calibrate.
+    pub async fn start_head_tracking(&self) -> Result<()> {
+        self.state.lock().await.head_tracker = Some(HeadTracker::new());
+        self.send_data_packet(&HEAD_TRACKING_START).await
+    }
+
+    pub async fn stop_head_tracking(&self) -> Result<()> {
+        self.state.lock().await.head_tracker = None;
+        self.send_data_packet(&HEAD_TRACKING_STOP).await
     }
 
     pub async fn send_control_command(

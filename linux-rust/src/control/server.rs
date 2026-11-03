@@ -16,7 +16,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
 
-use crate::bluetooth::aacp::ControlCommandStatus;
+use crate::bluetooth::aacp::{AACPManager, ControlCommandStatus};
+use crate::bluetooth::aacp_extras::{CustomEq, EQ_BAND_MAX, NAME_MAX_BYTES, validate_name};
 use crate::bluetooth::managers::DeviceManagers;
 use crate::control::settings::Setting;
 
@@ -89,9 +90,133 @@ async fn respond(request: &str, managers: &Managers) -> Value {
     match words.as_slice() {
         ["status"] => status(managers).await,
         ["settings"] => settings_help(),
+        ["set", name, value] if name.starts_with("eq") => set_eq(managers, name, value).await,
         ["set", name, value] => set(managers, name, value).await,
-        _ => error("usage: status | settings | set <setting> <value>"),
+        ["head-tracking", state] => head_tracking(managers, state).await,
+        ["rename", name @ ..] if !name.is_empty() => rename(managers, &name.join(" ")).await,
+        _ => error(
+            "usage: status | settings | set <setting> <value> | head-tracking on|off | rename <name>",
+        ),
     }
+}
+
+/// Run `action` on every connected device's AACP manager, returning the MACs it
+/// succeeded on, or an error when none did.
+async fn for_each_device<F, Fut>(managers: &Managers, what: &str, action: F) -> Result<Vec<String>, String>
+where
+    F: Fn(Arc<AACPManager>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let managers = managers.read().await;
+    let mut applied = Vec::new();
+    let mut last_error = None;
+    for (mac, manager) in managers.iter() {
+        let Some(aacp) = manager.get_aacp() else {
+            continue;
+        };
+        match action(aacp).await {
+            Ok(()) => {
+                info!("control socket: {what} on {mac}");
+                applied.push(mac.clone());
+            }
+            Err(e) => {
+                warn!("control socket: {what} on {mac} failed: {e}");
+                last_error = Some(e);
+            }
+        }
+    }
+    if applied.is_empty() {
+        return Err(last_error.unwrap_or_else(|| "no connected AirPods".to_string()));
+    }
+    Ok(applied)
+}
+
+/// New custom EQ after applying `eq on|off` or `eq-low|eq-mid|eq-high 0-100`.
+fn apply_eq(current: CustomEq, name: &str, value: &str) -> Result<CustomEq, String> {
+    let band = || {
+        value
+            .parse::<u8>()
+            .ok()
+            .filter(|v| *v <= EQ_BAND_MAX)
+            .ok_or_else(|| format!("{name}: expected 0-{EQ_BAND_MAX}"))
+    };
+    Ok(match name {
+        "eq" => match value {
+            "on" => CustomEq { enabled: true, ..current },
+            "off" => CustomEq { enabled: false, ..current },
+            _ => return Err("eq: expected on|off".to_string()),
+        },
+        "eq-low" => CustomEq { low: band()?, ..current },
+        "eq-mid" => CustomEq { mid: band()?, ..current },
+        "eq-high" => CustomEq { high: band()?, ..current },
+        _ => return Err(format!("unknown setting '{name}'; run 'settings' for the list")),
+    })
+}
+
+async fn set_eq(managers: &Managers, name: &str, value: &str) -> Value {
+    // Validate against a neutral EQ first so bad input never reaches a device.
+    let neutral = CustomEq { enabled: true, low: 50, mid: 50, high: 50 };
+    if let Err(e) = apply_eq(neutral, name, value) {
+        return error(e);
+    }
+    let result = for_each_device(managers, &format!("set {name} = {value}"), |aacp| async move {
+        let current = aacp
+            .state
+            .lock()
+            .await
+            .custom_eq
+            .ok_or("device has not reported a custom EQ")?;
+        let updated = apply_eq(current, name, value)?;
+        aacp.send_custom_eq(updated).await.map_err(|e| e.to_string())
+    })
+    .await;
+    match result {
+        Ok(applied) => json!({ "ok": true, "setting": name, "value": value, "applied": applied }),
+        Err(e) => error(e),
+    }
+}
+
+async fn head_tracking(managers: &Managers, state: &str) -> Value {
+    let start = match state {
+        "on" => true,
+        "off" => false,
+        _ => return error("head-tracking: expected on|off"),
+    };
+    let result = for_each_device(managers, &format!("head-tracking {state}"), |aacp| async move {
+        let sent = if start {
+            aacp.start_head_tracking().await
+        } else {
+            aacp.stop_head_tracking().await
+        };
+        sent.map_err(|e| e.to_string())
+    })
+    .await;
+    match result {
+        Ok(applied) => json!({ "ok": true, "head-tracking": state, "applied": applied }),
+        Err(e) => error(e),
+    }
+}
+
+async fn rename(managers: &Managers, name: &str) -> Value {
+    let name = match validate_name(name) {
+        Ok(name) => name.to_string(),
+        Err(e) => return error(e),
+    };
+    let result = for_each_device(managers, &format!("rename to '{name}'"), |aacp| {
+        let name = name.clone();
+        async move { aacp.send_rename_packet(&name).await.map_err(|e| e.to_string()) }
+    })
+    .await;
+    match result {
+        Ok(applied) => json!({ "ok": true, "name": name, "applied": applied }),
+        Err(e) => error(e),
+    }
+}
+
+/// Angle rounded to one decimal, computed in f64 so JSON shows e.g. 2.4, not
+/// the nearest f32 (2.4000000953674316).
+fn tenths(degrees: f32) -> f64 {
+    (f64::from(degrees) * 10.0).round() / 10.0
 }
 
 fn error(message: impl Into<String>) -> Value {
@@ -105,8 +230,20 @@ async fn status(managers: &Managers) -> Value {
         let Some(aacp) = manager.get_aacp() else {
             continue;
         };
-        let reported = aacp.state.lock().await.control_command_status_list.clone();
-        let settings: Map<String, Value> = Setting::ALL
+        let (reported, custom_eq, head) = {
+            let state = aacp.state.lock().await;
+            let head = state.head_tracker.as_ref().map(|t| match t.pose() {
+                Some(p) => json!({
+                    "calibrating": false,
+                    "yaw": tenths(p.yaw),
+                    "pitch": tenths(p.pitch),
+                    "roll": tenths(p.roll),
+                }),
+                None => json!({ "calibrating": t.calibrating() }),
+            });
+            (state.control_command_status_list.clone(), state.custom_eq, head)
+        };
+        let mut settings: Map<String, Value> = Setting::ALL
             .into_iter()
             .filter_map(|setting| {
                 reported
@@ -115,17 +252,39 @@ async fn status(managers: &Managers) -> Value {
                     .map(|r| (setting.name().to_string(), json!(setting.describe(&r.value))))
             })
             .collect();
-        devices.push(json!({ "mac": mac, "settings": settings }));
+        if let Some(eq) = custom_eq {
+            settings.insert("eq".to_string(), json!(if eq.enabled { "on" } else { "off" }));
+            settings.insert("eq-low".to_string(), json!(eq.low.to_string()));
+            settings.insert("eq-mid".to_string(), json!(eq.mid.to_string()));
+            settings.insert("eq-high".to_string(), json!(eq.high.to_string()));
+        }
+        let mut device = json!({ "mac": mac, "settings": settings });
+        if let Some(head) = head {
+            device["head"] = head;
+        }
+        devices.push(device);
     }
     json!({ "ok": true, "devices": devices })
 }
 
 fn settings_help() -> Value {
-    let settings: Map<String, Value> = Setting::ALL
+    let mut settings: Map<String, Value> = Setting::ALL
         .into_iter()
         .map(|s| (s.name().to_string(), json!(s.accepted())))
         .collect();
-    json!({ "ok": true, "settings": settings })
+    let band = format!("0-{EQ_BAND_MAX}");
+    settings.insert("eq".to_string(), json!("on|off"));
+    for name in ["eq-low", "eq-mid", "eq-high"] {
+        settings.insert(name.to_string(), json!(band));
+    }
+    json!({
+        "ok": true,
+        "settings": settings,
+        "commands": {
+            "head-tracking": "on|off",
+            "rename": format!("<name, up to {NAME_MAX_BYTES} bytes>"),
+        },
+    })
 }
 
 async fn set(managers: &Managers, name: &str, value: &str) -> Value {
@@ -226,5 +385,58 @@ mod tests {
         assert_eq!(respond("status", &empty()).await["devices"], json!([]));
         let help = respond("settings", &empty()).await;
         assert_eq!(help["settings"]["chime-volume"], "0-100");
+        assert_eq!(help["settings"]["eq-mid"], "0-100");
+        assert_eq!(help["commands"]["head-tracking"], "on|off");
+    }
+
+    const REPORTED_EQ: CustomEq = CustomEq {
+        enabled: true,
+        low: 75,
+        mid: 31,
+        high: 74,
+    };
+
+    #[test]
+    fn eq_changes_touch_only_the_named_field() {
+        let low = apply_eq(REPORTED_EQ, "eq-low", "20").unwrap();
+        assert_eq!(low, CustomEq { low: 20, ..REPORTED_EQ });
+        let off = apply_eq(REPORTED_EQ, "eq", "off").unwrap();
+        assert_eq!(off, CustomEq { enabled: false, ..REPORTED_EQ });
+    }
+
+    #[test]
+    fn eq_changes_reject_bad_values() {
+        assert!(apply_eq(REPORTED_EQ, "eq-high", "101").is_err());
+        assert!(apply_eq(REPORTED_EQ, "eq", "maybe").is_err());
+        assert!(apply_eq(REPORTED_EQ, "eq-bass", "10").is_err());
+    }
+
+    #[tokio::test]
+    async fn new_commands_validate_before_sending() {
+        let m = empty();
+        assert!(respond("set eq-mid 500", &m).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("0-100"));
+        assert!(respond("head-tracking sideways", &m).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("on|off"));
+        let long = format!("rename {}", "x".repeat(NAME_MAX_BYTES + 1));
+        assert!(respond(&long, &m).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("limit"));
+        assert_eq!(respond("rename", &m).await["ok"], false);
+    }
+
+    #[tokio::test]
+    async fn new_commands_without_devices_report_no_airpods() {
+        let m = empty();
+        for request in ["set eq on", "head-tracking on", "rename Pods"] {
+            let reply = respond(request, &m).await;
+            assert_eq!(reply["ok"], false, "{request}");
+            assert!(reply["error"].as_str().unwrap().contains("no connected AirPods"));
+        }
     }
 }
