@@ -228,6 +228,54 @@ impl HeadTracker {
     }
 }
 
+/// Packets kept by `PacketLog`; older ones are dropped first.
+pub const PACKET_LOG_CAPACITY: usize = 256;
+
+/// One packet whose opcode the protocol layer does not handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoggedPacket {
+    /// Milliseconds since the Unix epoch when it arrived.
+    pub unix_ms: u64,
+    pub opcode: u8,
+    pub bytes: Vec<u8>,
+}
+
+/// In-memory ring buffer of recent unhandled packets, used to work out what
+/// undocumented messages mean by correlating them with actions on the device.
+#[derive(Debug, Default)]
+pub struct PacketLog {
+    entries: std::collections::VecDeque<LoggedPacket>,
+}
+
+impl PacketLog {
+    pub fn record(&mut self, opcode: u8, packet: &[u8]) {
+        let unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        if self.entries.len() == PACKET_LOG_CAPACITY {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(LoggedPacket {
+            unix_ms,
+            opcode,
+            bytes: packet.to_vec(),
+        });
+    }
+
+    /// Oldest first, optionally only one opcode.
+    pub fn entries(&self, opcode: Option<u8>) -> Vec<LoggedPacket> {
+        self.entries
+            .iter()
+            .filter(|p| opcode.is_none_or(|op| p.opcode == op))
+            .cloned()
+            .collect()
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
 /// Longest device name accepted, in bytes.
 pub const NAME_MAX_BYTES: usize = 32;
 
@@ -363,6 +411,22 @@ mod tests {
             tracker.process(&[0u8; 81]);
         }
         assert!(tracker.calibrating());
+    }
+
+    #[test]
+    fn packet_log_keeps_newest_and_filters_by_opcode() {
+        let mut log = PacketLog::default();
+        for i in 0..(PACKET_LOG_CAPACITY + 10) {
+            let opcode = if i % 2 == 0 { 0x55 } else { 0x08 };
+            log.record(opcode, &[0x04, 0x00, 0x04, 0x00, opcode, i as u8]);
+        }
+        let all = log.entries(None);
+        assert_eq!(all.len(), PACKET_LOG_CAPACITY);
+        assert_eq!(all[0].bytes[5], 10, "oldest entries were dropped first");
+        assert!(log.entries(Some(0x55)).iter().all(|p| p.opcode == 0x55));
+        assert_eq!(log.entries(Some(0x55)).len(), PACKET_LOG_CAPACITY / 2);
+        log.clear();
+        assert!(log.entries(None).is_empty());
     }
 
     #[test]

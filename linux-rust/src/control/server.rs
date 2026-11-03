@@ -94,10 +94,51 @@ async fn respond(request: &str, managers: &Managers) -> Value {
         ["set", name, value] => set(managers, name, value).await,
         ["head-tracking", state] => head_tracking(managers, state).await,
         ["rename", name @ ..] if !name.is_empty() => rename(managers, &name.join(" ")).await,
+        ["packets"] => packets(managers, None, false).await,
+        ["packets", "clear"] => packets(managers, None, true).await,
+        ["packets", opcode] => match parse_opcode(opcode) {
+            Some(op) => packets(managers, Some(op), false).await,
+            None => error("packets: expected an opcode such as 0x55"),
+        },
         _ => error(
-            "usage: status | settings | set <setting> <value> | head-tracking on|off | rename <name>",
+            "usage: status | settings | set <setting> <value> | head-tracking on|off | \
+             rename <name> | packets [clear|<opcode>]",
         ),
     }
+}
+
+/// Opcode given as `0x55` or `55` (hexadecimal).
+fn parse_opcode(text: &str) -> Option<u8> {
+    u8::from_str_radix(text.trim_start_matches("0x"), 16).ok()
+}
+
+/// Recent unhandled packets from every connected device (oldest first), or
+/// clear them.
+async fn packets(managers: &Managers, opcode: Option<u8>, clear: bool) -> Value {
+    let managers = managers.read().await;
+    let mut out = Vec::new();
+    for (mac, manager) in managers.iter() {
+        let Some(aacp) = manager.get_aacp() else {
+            continue;
+        };
+        let mut state = aacp.state.lock().await;
+        if clear {
+            state.unknown_packets.clear();
+            continue;
+        }
+        for p in state.unknown_packets.entries(opcode) {
+            out.push(json!({
+                "mac": mac,
+                "t": p.unix_ms,
+                "opcode": format!("{:#04x}", p.opcode),
+                "hex": hex::encode(&p.bytes),
+            }));
+        }
+    }
+    if clear {
+        return json!({ "ok": true, "cleared": true });
+    }
+    json!({ "ok": true, "packets": out })
 }
 
 /// Run `action` on every connected device's AACP manager, returning the MACs it

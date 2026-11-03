@@ -1,5 +1,5 @@
 use crate::bluetooth::aacp_extras::{
-    CustomEq, HEAD_TRACKING_START, HEAD_TRACKING_STOP, HeadTracker,
+    CustomEq, HEAD_TRACKING_START, HEAD_TRACKING_STOP, HeadTracker, PacketLog,
 };
 use crate::devices::airpods::AirPodsInformation;
 use crate::devices::enums::{DeviceData, DeviceInformation, DeviceType};
@@ -363,6 +363,8 @@ pub struct AACPManagerState {
     pub custom_eq: Option<CustomEq>,
     /// Present while head tracking is running.
     pub head_tracker: Option<HeadTracker>,
+    /// Recent packets with opcodes this module does not handle.
+    pub unknown_packets: PacketLog,
 }
 
 impl AACPManagerState {
@@ -389,6 +391,7 @@ impl AACPManagerState {
             audio_tx: None,
             custom_eq: None,
             head_tracker: None,
+            unknown_packets: PacketLog::default(),
         }
     }
 }
@@ -1096,7 +1099,10 @@ impl AACPManager {
                     None => debug!("Received head-tracking descriptor ({} bytes)", packet.len()),
                 }
             }
-            _ => debug!("Received unknown packet with opcode {:#04x}", opcode),
+            _ => {
+                debug!("Received unknown packet with opcode {:#04x}", opcode);
+                self.state.lock().await.unknown_packets.record(opcode, packet);
+            }
         }
     }
 
