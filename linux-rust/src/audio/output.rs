@@ -156,9 +156,10 @@ impl Output {
             }
         };
 
-        let agc = crate::utils::AppSettings::load()
+        let settings = crate::utils::AppSettings::load();
+        let agc = settings
             .hires_mic_agc
-            .then(|| Agc::new(sample_rate));
+            .then(|| Agc::new(sample_rate, &settings.hires_mic_agc_tuning));
         if agc.is_none() {
             info!("[pw] AGC disabled; passing through raw hi-res capture");
         }

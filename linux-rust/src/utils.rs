@@ -180,6 +180,33 @@ impl std::fmt::Display for MyTheme {
     }
 }
 
+/// Hi-res microphone AGC parameters. Read at the start of every capture, so
+/// changes apply to the next recording without a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgcTuning {
+    /// Level the gain steers speech toward.
+    pub target_dbfs: f32,
+    /// Largest boost applied to quiet input.
+    pub max_gain_db: f32,
+    /// Below this envelope level input counts as background and the gain is held.
+    pub gate_dbfs: f32,
+    pub attack_ms: f32,
+    pub release_ms: f32,
+}
+
+impl Default for AgcTuning {
+    fn default() -> Self {
+        Self {
+            target_dbfs: -12.0,
+            max_gain_db: 18.0,
+            gate_dbfs: -50.0,
+            attack_ms: 5.0,
+            release_ms: 400.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -188,6 +215,7 @@ pub struct AppSettings {
     pub stem_control: bool,
     pub hires_mic_enabled: bool,
     pub hires_mic_agc: bool,
+    pub hires_mic_agc_tuning: AgcTuning,
     pub hires_mic_pause_convo: bool,
     pub a2dp_reset: bool,
 }
@@ -200,6 +228,7 @@ impl Default for AppSettings {
             stem_control: false,
             hires_mic_enabled: true,
             hires_mic_agc: true,
+            hires_mic_agc_tuning: AgcTuning::default(),
             hires_mic_pause_convo: true,
             a2dp_reset: true,
         }

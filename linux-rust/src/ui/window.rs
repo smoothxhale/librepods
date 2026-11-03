@@ -238,6 +238,8 @@ impl App {
             hires_mic_agc: self.hires_mic_agc,
             hires_mic_pause_convo: self.hires_mic_pause_convo,
             a2dp_reset: self.a2dp_reset,
+            // Settings the window does not edit (such as AGC tuning) keep their stored values.
+            ..AppSettings::load()
         }
         .save();
     }
