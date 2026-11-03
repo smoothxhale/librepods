@@ -82,8 +82,12 @@ const VERTICAL_ACCEL_OFFSET: usize = 53;
 const CALIBRATION_SAMPLES: usize = 10;
 const Q15_SCALE: f32 = 32768.0;
 
-/// Head orientation in degrees relative to the calibrated neutral position, as
-/// rotations about the sensor's z (yaw), y (pitch) and x (roll) axes.
+/// Head orientation in degrees relative to the calibrated neutral position:
+/// yaw = turning the head, pitch = nodding, roll = tilting toward a shoulder,
+/// each positive toward the wearer's right. The earbud sensor's frame is
+/// rotated against the head (its z axis follows the nod, its y axis the turn)
+/// and mirrored on every axis; `process` converts it. Mapping confirmed by
+/// observation on AirPods 4.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HeadPose {
     pub yaw: f32,
@@ -212,12 +216,12 @@ impl HeadTracker {
             return;
         };
 
-        let (yaw, pitch, roll) = neutral.conjugate().mul(q).euler_degrees();
+        let (sensor_yaw, sensor_pitch, sensor_roll) = neutral.conjugate().mul(q).euler_degrees();
         let accel = |offset| report_i16(packet, offset).map_or(0.0, f32::from);
         self.pose = Some(HeadPose {
-            yaw,
-            pitch,
-            roll,
+            yaw: -sensor_pitch,
+            pitch: -sensor_yaw,
+            roll: -sensor_roll,
             horizontal_accel: accel(HORIZONTAL_ACCEL_OFFSET),
             vertical_accel: accel(VERTICAL_ACCEL_OFFSET),
         });
@@ -310,19 +314,33 @@ mod tests {
     }
 
     #[test]
-    fn head_tracker_reports_rotation_relative_to_neutral() {
+    fn sensor_z_rotation_is_a_nod() {
         let neutral = rotation(40.0, 1.0, 0.0, 0.0);
         let mut tracker = calibrated(neutral);
-
         tracker.process(&report(81, neutral.mul(rotation(30.0, 0.0, 0.0, 1.0))));
         let pose = tracker.pose().unwrap();
-        assert!((pose.yaw - 30.0).abs() < 0.1, "yaw {}", pose.yaw);
-        assert!(pose.pitch.abs() < 0.1 && pose.roll.abs() < 0.1, "{pose:?}");
+        assert!((pose.pitch + 30.0).abs() < 0.1, "pitch {}", pose.pitch);
+        assert!(pose.yaw.abs() < 0.1 && pose.roll.abs() < 0.1, "{pose:?}");
+    }
 
+    #[test]
+    fn sensor_y_rotation_is_a_turn() {
+        let neutral = rotation(40.0, 1.0, 0.0, 0.0);
+        let mut tracker = calibrated(neutral);
         tracker.process(&report(81, neutral.mul(rotation(-20.0, 0.0, 1.0, 0.0))));
         let pose = tracker.pose().unwrap();
-        assert!((pose.pitch + 20.0).abs() < 0.1, "pitch {}", pose.pitch);
-        assert!(pose.yaw.abs() < 0.1 && pose.roll.abs() < 0.1, "{pose:?}");
+        assert!((pose.yaw - 20.0).abs() < 0.1, "yaw {}", pose.yaw);
+        assert!(pose.pitch.abs() < 0.1 && pose.roll.abs() < 0.1, "{pose:?}");
+    }
+
+    #[test]
+    fn sensor_x_rotation_is_a_tilt() {
+        let neutral = rotation(25.0, 0.0, 1.0, 0.0);
+        let mut tracker = calibrated(neutral);
+        tracker.process(&report(81, neutral.mul(rotation(15.0, 1.0, 0.0, 0.0))));
+        let pose = tracker.pose().unwrap();
+        assert!((pose.roll + 15.0).abs() < 0.1, "roll {}", pose.roll);
+        assert!(pose.yaw.abs() < 0.1 && pose.pitch.abs() < 0.1, "{pose:?}");
     }
 
     #[test]
