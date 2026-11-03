@@ -2,7 +2,7 @@
 
 use libpulse_binding::callbacks::ListResult;
 use libpulse_binding::context::{Context, FlagSet as ContextFlagSet};
-use libpulse_binding::def::Retval;
+use libpulse_binding::def::{Retval, SourceState};
 use libpulse_binding::mainloop::standard::{IterateResult, Mainloop};
 use libpulse_binding::operation::State as OperationState;
 use log::{error, info, warn};
@@ -18,6 +18,8 @@ use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
 use crate::audio::agc::Agc;
 
 pub const SOURCE_NAME: &str = "AirPodsHiRes";
+/// Reported as the recording app when the consumer is a native PipeWire client.
+const NATIVE_CONSUMER_LABEL: &str = "PipeWire client";
 
 // FIFO the pipe-source reads from and that Output writes PCM into.
 fn fifo_path() -> String {
@@ -136,11 +138,14 @@ pub fn source_consumer(name: &str) -> Option<String> {
     let introspect = context.introspect();
 
     let index = Rc::new(Cell::new(u32::MAX));
+    let running = Rc::new(Cell::new(false));
     let op = introspect.get_source_info_by_name(name, {
         let index = index.clone();
+        let running = running.clone();
         move |result| {
             if let ListResult::Item(item) = result {
                 index.set(item.index);
+                running.set(item.state == SourceState::Running);
             }
         }
     });
@@ -172,7 +177,37 @@ pub fn source_consumer(name: &str) -> Option<String> {
     mainloop.quit(Retval(0));
 
     let result = app.borrow().clone();
-    result
+    recording_consumer(result, running.get())
+}
+
+/// Native PipeWire consumers (filter chains such as EasyEffects, or apps linked
+/// through a filter) never appear as Pulse source-outputs, but they still drive
+/// the source into the running state. A named source-output wins; otherwise a
+/// running source counts as being recorded by an unnamed native client.
+fn recording_consumer(source_output_app: Option<String>, source_running: bool) -> Option<String> {
+    source_output_app.or_else(|| source_running.then(|| NATIVE_CONSUMER_LABEL.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_source_output_is_reported() {
+        let app = recording_consumer(Some("Discord".into()), true);
+        assert_eq!(app.as_deref(), Some("Discord"));
+    }
+
+    #[test]
+    fn running_source_without_source_output_counts_as_native_consumer() {
+        let app = recording_consumer(None, true);
+        assert_eq!(app.as_deref(), Some(NATIVE_CONSUMER_LABEL));
+    }
+
+    #[test]
+    fn idle_source_without_source_output_is_not_recording() {
+        assert_eq!(recording_consumer(None, false), None);
+    }
 }
 
 // A2DP transport reset:
