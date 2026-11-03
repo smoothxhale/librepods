@@ -112,6 +112,7 @@ async fn async_main(
     let mut managed_devices_mac: Vec<String> = Vec::new(); // includes ony non-AirPods. AirPods handled separately.
 
     let devices_path = get_devices_path();
+    utils::restrict_devices_file();
     let devices_json = std::fs::read_to_string(&devices_path).unwrap_or_else(|e| {
         log::error!("Failed to read devices file: {}", e);
         "{}".to_string()

@@ -13,6 +13,26 @@ pub fn get_devices_path() -> PathBuf {
         .join("devices.json")
 }
 
+/// Restrict the devices file to its owner. It stores each device's proximity
+/// keys (IRK and encryption key), which identify the device and decrypt its BLE
+/// broadcasts. Later writes keep these permissions because they reuse the file.
+pub fn restrict_devices_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = get_devices_path();
+    let restrict = |p: &std::path::Path, mode: u32| {
+        if let Err(e) = std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode))
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("Failed to restrict permissions on {}: {}", p.display(), e);
+        }
+    };
+    if let Some(dir) = path.parent() {
+        restrict(dir, 0o700);
+    }
+    restrict(&path, 0o600);
+}
+
 pub fn ensure_device_registered(mac: &str, name: &str, type_: crate::devices::enums::DeviceType) {
     use crate::devices::enums::DeviceData;
     use std::collections::HashMap;
@@ -40,6 +60,7 @@ pub fn ensure_device_registered(mac: &str, name: &str, type_: crate::devices::en
             if let Err(e) = std::fs::write(&path, updated) {
                 log::error!("Failed to write devices file: {}", e);
             }
+            restrict_devices_file();
         }
         Err(e) => log::error!("Failed to serialize devices file: {}", e),
     }
