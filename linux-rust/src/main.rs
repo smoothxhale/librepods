@@ -1,5 +1,6 @@
 mod audio;
 mod bluetooth;
+mod control;
 mod devices;
 mod media_controller;
 mod ui;
@@ -13,7 +14,7 @@ use crate::ui::messages::BluetoothUIMessage;
 use crate::ui::tray::MyTray;
 use crate::utils::{ensure_device_registered, get_app_settings_path, get_devices_path};
 use bluer::{Address, InternalErrorKind};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use dbus::arg::{RefArg, Variant};
 use dbus::blocking::Connection;
 use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
@@ -45,7 +46,19 @@ struct Args {
     )]
     le_debug: bool,
     #[arg(long, short = 'v', help = "Show application version and exit")]
-    version: bool
+    version: bool,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Query or change the running instance: `status`, `settings`,
+    /// or `set <setting> <value>` (for example `set press-speed slower`)
+    Ctl {
+        #[arg(required = true, num_args = 1..)]
+        request: Vec<String>,
+    },
 }
 
 fn main() -> iced::Result {
@@ -57,6 +70,21 @@ fn main() -> iced::Result {
             env!("CARGO_PKG_VERSION")
         );
         return Ok(());
+    }
+
+    if let Some(Command::Ctl { request }) = &args.command {
+        match control::server::request(&request.join(" ")) {
+            Ok(reply) => {
+                println!("{reply}");
+                let ok = serde_json::from_str::<serde_json::Value>(&reply)
+                    .is_ok_and(|v| v["ok"] == true);
+                std::process::exit(if ok { 0 } else { 1 });
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
     }
 
     let log_level = if args.debug { "debug" } else { "info" };
@@ -166,6 +194,8 @@ async fn async_main(
     let session = bluer::Session::new().await?;
     let adapter = session.default_adapter().await?;
     adapter.set_powered(true).await?;
+
+    tokio::spawn(control::server::serve(device_managers.clone()));
 
     let le_tray_clone = tray_handle.clone();
     tokio::spawn(async move {
