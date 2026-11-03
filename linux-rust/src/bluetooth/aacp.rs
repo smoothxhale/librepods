@@ -106,6 +106,7 @@ pub enum ControlCommandIdentifiers {
     EarDetectionConfig = 0x0A,
     AutomaticConnectionConfig = 0x20,
     OwnsConnection = 0x06,
+    UplinkEqBudConfig = 0x3E,
 }
 
 impl ControlCommandIdentifiers {
@@ -146,6 +147,7 @@ impl ControlCommandIdentifiers {
             0x0A => Some(Self::EarDetectionConfig),
             0x20 => Some(Self::AutomaticConnectionConfig),
             0x06 => Some(Self::OwnsConnection),
+            0x3E => Some(Self::UplinkEqBudConfig),
             _ => None,
         }
     }
@@ -189,6 +191,7 @@ impl std::fmt::Display for ControlCommandIdentifiers {
             ControlCommandIdentifiers::EarDetectionConfig => "Ear Detection Config",
             ControlCommandIdentifiers::AutomaticConnectionConfig => "Automatic Connection Config",
             ControlCommandIdentifiers::OwnsConnection => "Owns Connection",
+            ControlCommandIdentifiers::UplinkEqBudConfig => "Uplink EQ Bud Config",
         };
         write!(f, "{}", name)
     }
