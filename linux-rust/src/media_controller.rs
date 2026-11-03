@@ -564,7 +564,10 @@ impl MediaController {
             return cached_profile;
         }
 
-        for profile in ["a2dp-sink-sbc_xq", "a2dp-sink-sbc", "a2dp-sink"] {
+        // PipeWire exposes "a2dp-sink" as the highest-priority codec the headset
+        // supports (AAC on AirPods), so it is preferred; the codec-specific SBC
+        // profiles are fallbacks for stacks that only expose those.
+        for profile in ["a2dp-sink", "a2dp-sink-sbc_xq", "a2dp-sink-sbc"] {
             if self.is_profile_available(index, profile).await {
                 info!("Selected best available A2DP profile: {}", profile);
                 self.state.lock().await.cached_a2dp_profile = profile.to_string();
