@@ -10,7 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dbus::blocking::Connection;
 use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
@@ -74,12 +74,65 @@ impl Drop for VirtualMic {
     }
 }
 
+/// How often the hi-res source's mute state is re-read while capturing.
+const MUTE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Reads the PipeWire mute flag of the hi-res source over a persistent connection.
+struct MuteWatch {
+    mainloop: Mainloop,
+    context: Context,
+}
+
+impl MuteWatch {
+    fn connect() -> Option<MuteWatch> {
+        let (mainloop, context) = connect()?;
+        Some(MuteWatch { mainloop, context })
+    }
+
+    /// Current mute flag of the source, or None if it could not be read.
+    fn muted(&mut self) -> Option<bool> {
+        let muted = Rc::new(Cell::new(None::<bool>));
+        let op = self.context.introspect().get_source_info_by_name(SOURCE_NAME, {
+            let muted = muted.clone();
+            move |result| {
+                if let ListResult::Item(item) = result {
+                    muted.set(Some(item.mute));
+                }
+            }
+        });
+        while op.get_state() == OperationState::Running {
+            match self.mainloop.iterate(true) {
+                IterateResult::Quit(_) | IterateResult::Err(_) => return None,
+                IterateResult::Success(_) => {}
+            }
+        }
+        muted.get()
+    }
+}
+
+/// Samples to write to the FIFO for one decoded frame. The FIFO is readable by any
+/// process of the same user, so a muted microphone must only ever produce silence.
+fn fifo_frame(pcm: &[i16], muted: bool) -> std::borrow::Cow<'_, [i16]> {
+    if muted {
+        std::borrow::Cow::Owned(vec![0; pcm.len()])
+    } else {
+        std::borrow::Cow::Borrowed(pcm)
+    }
+}
+
 // Writes PCM into the pipe-source's FIFO. Opened only while an app is recording.
 pub struct Output {
     fifo: File,
     agc: Option<Agc>,
+    /// Created lazily on the decode thread, so it never crosses threads.
+    mute_watch: Option<MuteWatch>,
+    last_mute_poll: Option<Instant>,
+    muted: bool,
 }
 
+// SAFETY: Output is moved to the decode thread once, before any write. The only
+// non-Send field, `mute_watch`, is None until the first write creates it on that
+// thread, so its PulseAudio mainloop and context are never shared across threads.
 unsafe impl Send for Output {}
 
 impl Output {
@@ -101,13 +154,54 @@ impl Output {
         if agc.is_none() {
             info!("[pw] AGC disabled; passing through raw hi-res capture");
         }
-        Some(Output { fifo, agc })
+        Some(Output {
+            fifo,
+            agc,
+            mute_watch: None,
+            last_mute_poll: None,
+            // Silent until the first successful mute query.
+            muted: true,
+        })
+    }
+
+    /// Refresh the cached mute flag at most every MUTE_POLL_INTERVAL. An unreadable
+    /// state counts as muted, so audio only flows while the source is known unmuted.
+    fn refresh_mute(&mut self) {
+        let due = self
+            .last_mute_poll
+            .is_none_or(|t| t.elapsed() >= MUTE_POLL_INTERVAL);
+        if !due {
+            return;
+        }
+        self.last_mute_poll = Some(Instant::now());
+
+        if self.mute_watch.is_none() {
+            self.mute_watch = MuteWatch::connect();
+        }
+        let state = self.mute_watch.as_mut().and_then(MuteWatch::muted);
+        if state.is_none() {
+            // Reconnect on the next poll.
+            self.mute_watch = None;
+        }
+        let muted = state.unwrap_or(true);
+        if muted != self.muted {
+            info!(
+                "[pw] hi-res source {}",
+                if muted { "muted; writing silence" } else { "unmuted" }
+            );
+        }
+        self.muted = muted;
     }
 
     // Write s16 PCM into the FIFO, returning the (post-AGC) peak
     pub fn write(&mut self, pcm: &[i16]) -> Result<f32, ()> {
+        self.refresh_mute();
+        let pcm = fifo_frame(pcm, self.muted);
+        let pcm: &[i16] = &pcm;
+
         let processed;
-        let pcm: &[i16] = if let Some(agc) = &mut self.agc {
+        // AGC is held while muted so its gain does not climb on silence.
+        let pcm: &[i16] = if let (Some(agc), false) = (&mut self.agc, self.muted) {
             let mut buf = pcm.to_vec();
             agc.process(&mut buf);
             processed = buf;
@@ -207,6 +301,20 @@ mod tests {
     #[test]
     fn idle_source_without_source_output_is_not_recording() {
         assert_eq!(recording_consumer(None, false), None);
+    }
+
+    #[test]
+    fn muted_frame_is_all_silence_of_same_length() {
+        let pcm = [1200i16, -3000, 32767, -32768];
+        let out = fifo_frame(&pcm, true);
+        assert_eq!(out.len(), pcm.len());
+        assert!(out.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn unmuted_frame_passes_samples_through() {
+        let pcm = [1200i16, -3000, 32767, -32768];
+        assert_eq!(&*fifo_frame(&pcm, false), &pcm);
     }
 }
 
