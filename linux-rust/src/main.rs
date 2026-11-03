@@ -299,6 +299,7 @@ async fn async_main(
             return true;
         };
         if is_connected==0 {
+            devices::battery_state::clear(&addr_str);
             if let Err(e) = ui_tx.send(BluetoothUIMessage::DeviceDisconnected(addr_str.clone())) {
                 warn!("Failed to send DeviceConnected UI message: {:?}", e);
             }

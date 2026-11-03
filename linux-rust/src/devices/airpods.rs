@@ -279,6 +279,10 @@ impl AirPodsDevice {
                                 .await;
                         }
                         debug!("Updated tray with new battery info");
+                        crate::devices::battery_state::publish(
+                            &mac_address.to_string(),
+                            &battery_info,
+                        );
 
                         let _ = ui_tx_clone.send(BluetoothUIMessage::AACPUIEvent(
                             mac_address.to_string(),
