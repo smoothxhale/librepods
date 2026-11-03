@@ -136,7 +136,7 @@ pub struct Output {
 unsafe impl Send for Output {}
 
 impl Output {
-    pub fn open(_sample_rate: u32, _channels: u8) -> Option<Output> {
+    pub fn open(sample_rate: u32, _channels: u8) -> Option<Output> {
         // O_RDWR never blocks on a FIFO and keeps the pipe from ever seeing
         // "all writers closed"; we only ever write to it.
         let path = fifo_path();
@@ -150,7 +150,7 @@ impl Output {
 
         let agc = crate::utils::AppSettings::load()
             .hires_mic_agc
-            .then(Agc::new);
+            .then(|| Agc::new(sample_rate));
         if agc.is_none() {
             info!("[pw] AGC disabled; passing through raw hi-res capture");
         }
