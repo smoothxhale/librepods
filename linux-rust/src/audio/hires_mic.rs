@@ -24,7 +24,46 @@ const POLL_INTERVAL: Duration = Duration::from_millis(400);
 /// If no audio SDUs arrive for this long while a capture is active, the stream
 /// is considered stalled and the capture is torn down and restarted.
 const STALL_TIMEOUT: Duration = Duration::from_millis(2000);
+/// Wait before the first retry after a stall; doubles with each consecutive stall.
+/// A stall persists while, for example, one bud charges in a closed case, and every
+/// retry resets the A2DP transport, so retries must not be continuous.
+const STALL_BACKOFF_BASE: Duration = Duration::from_secs(2);
+const STALL_BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// A capture that streamed at least this long before stalling counts as healthy,
+/// so its stall restarts the backoff from the beginning.
+const HEALTHY_RUN: Duration = Duration::from_secs(10);
 const LEVEL_RELEASE: f32 = 0.85;
+
+/// Delay before retrying after `consecutive` stalls (1 = the first stall).
+fn stall_backoff(consecutive: u32) -> Duration {
+    let factor = 1u32 << consecutive.saturating_sub(1).min(16);
+    STALL_BACKOFF_BASE
+        .saturating_mul(factor)
+        .min(STALL_BACKOFF_MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_from_two_seconds() {
+        assert_eq!(stall_backoff(1), Duration::from_secs(2));
+        assert_eq!(stall_backoff(2), Duration::from_secs(4));
+        assert_eq!(stall_backoff(3), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn backoff_is_capped() {
+        assert_eq!(stall_backoff(6), STALL_BACKOFF_MAX);
+        assert_eq!(stall_backoff(u32::MAX), STALL_BACKOFF_MAX);
+    }
+
+    #[test]
+    fn backoff_treats_zero_like_first_stall() {
+        assert_eq!(stall_backoff(0), Duration::from_secs(2));
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct MicStatus {
@@ -136,6 +175,11 @@ async fn monitor_loop(
     let mut capture: Option<Capture> = None;
     // Conversation detection value saved while we override it off for capture.
     let mut old_convo_state: Option<bool> = None;
+    // Consecutive stalls, when the current capture began, and the earliest time
+    // a new capture may start after a stall.
+    let mut stalls: u32 = 0;
+    let mut capture_started: Option<Instant> = None;
+    let mut retry_at: Option<Instant> = None;
     info!(
         "[hires] activity monitor started, watching '{}'",
         output::SOURCE_NAME
@@ -156,10 +200,14 @@ async fn monitor_loop(
 
         match (enabled, recording, capture.is_some()) {
             (true, true, false) => {
+                if retry_at.is_some_and(|t| Instant::now() < t) {
+                    continue;
+                }
                 info!("[hires] recorder detected ({:?}), starting capture", app);
                 if let Some(c) = start_capture(&aacp, &addr, &status).await {
                     status.set_capture(app);
                     capture = Some(c);
+                    capture_started = Some(Instant::now());
 
                     // Only disable (and remember to restore) if it was on.
                     if crate::utils::AppSettings::load().hires_mic_pause_convo
@@ -174,16 +222,19 @@ async fn monitor_loop(
                 status.set_capture(app);
                 let stalled = status.since_last_sdu().is_some_and(|d| d > STALL_TIMEOUT);
                 if stalled {
+                    let healthy = capture_started.is_some_and(|t| t.elapsed() >= HEALTHY_RUN);
+                    stalls = if healthy { 1 } else { stalls + 1 };
+                    let wait = stall_backoff(stalls);
                     warn!(
-                        "[hires] no audio from device for {}ms, restarting capture",
-                        STALL_TIMEOUT.as_millis()
+                        "[hires] no audio from device for {}ms (stall {}), retrying in {}s",
+                        STALL_TIMEOUT.as_millis(),
+                        stalls,
+                        wait.as_secs()
                     );
                     stop_capture(capture.take().unwrap(), &aacp, &addr).await;
-                    capture = start_capture(&aacp, &addr, &status).await;
-                    if capture.is_none() {
-                        warn!("[hires] capture restart failed; will retry on next poll");
-                        status.reset();
-                    }
+                    capture_started = None;
+                    retry_at = Some(Instant::now() + wait);
+                    status.reset();
                 }
             }
             // Disabled while capturing: end the 0x58 stream now.
@@ -199,6 +250,14 @@ async fn monitor_loop(
                     aacp.set_conversation_detection(prev).await;
                 }
                 status.reset();
+            }
+            // Recorder gone while idle or waiting out a backoff: start fresh next time.
+            (_, false, false) => {
+                stalls = 0;
+                retry_at = None;
+                if let Some(prev) = old_convo_state.take() {
+                    aacp.set_conversation_detection(prev).await;
+                }
             }
             _ => {}
         }
