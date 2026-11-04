@@ -21,6 +21,32 @@ use crate::bluetooth::aacp_extras::{CustomEq, EQ_BAND_MAX, NAME_MAX_BYTES, valid
 use crate::bluetooth::managers::DeviceManagers;
 use crate::control::settings::Setting;
 
+/// Bluetooth address of this computer's adapter, looked up once at startup; used to
+/// tell whether this computer or another device is using the AirPods.
+static LOCAL_ADDRESS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Who the AirPods are playing for, from their audio-source report and their list
+/// of connected source devices: "this-device", "other-device", "none" or "unknown".
+fn audio_owner(local: Option<&str>, source: Option<&str>, connected: &[String]) -> &'static str {
+    let Some(local) = local else {
+        return "unknown";
+    };
+    let is_local = |mac: &str| mac.eq_ignore_ascii_case(local);
+    if source.is_some_and(is_local) {
+        "this-device"
+    } else if !connected.is_empty() && !connected.iter().any(|m| is_local(m)) {
+        "other-device"
+    } else {
+        "none"
+    }
+}
+
+async fn local_adapter_address() -> Option<String> {
+    let session = bluer::Session::new().await.ok()?;
+    let adapter = session.default_adapter().await.ok()?;
+    adapter.address().await.ok().map(|a| a.to_string())
+}
+
 /// Longest request line accepted; requests are a few words.
 const MAX_REQUEST_BYTES: u64 = 4096;
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -56,6 +82,12 @@ pub async fn serve(managers: Managers) {
         warn!("control socket: cannot restrict permissions: {}", e);
     }
     info!("Control socket listening on {}", path.display());
+    match local_adapter_address().await {
+        Some(address) => {
+            let _ = LOCAL_ADDRESS.set(address);
+        }
+        None => warn!("control socket: adapter address unknown; audio owner unavailable"),
+    }
 
     loop {
         match listener.accept().await {
@@ -271,8 +303,21 @@ async fn status(managers: &Managers) -> Value {
         let Some(aacp) = manager.get_aacp() else {
             continue;
         };
-        let (reported, custom_eq, head) = {
+        let (reported, custom_eq, head, audio) = {
             let state = aacp.state.lock().await;
+            let source = state
+                .audio_source
+                .as_ref()
+                .map(|s| s.mac.clone())
+                .filter(|m| m != "00:00:00:00:00:00");
+            let connected: Vec<String> =
+                state.connected_devices.iter().map(|d| d.mac.clone()).collect();
+            let owner = audio_owner(
+                LOCAL_ADDRESS.get().map(String::as_str),
+                source.as_deref(),
+                &connected,
+            );
+            let audio = json!({ "owner": owner, "source": source, "connected": connected });
             let head = state.head_tracker.as_ref().map(|t| match t.pose() {
                 Some(p) => json!({
                     "calibrating": false,
@@ -282,7 +327,7 @@ async fn status(managers: &Managers) -> Value {
                 }),
                 None => json!({ "calibrating": t.calibrating() }),
             });
-            (state.control_command_status_list.clone(), state.custom_eq, head)
+            (state.control_command_status_list.clone(), state.custom_eq, head, audio)
         };
         let mut settings: Map<String, Value> = Setting::ALL
             .into_iter()
@@ -299,7 +344,7 @@ async fn status(managers: &Managers) -> Value {
             settings.insert("eq-mid".to_string(), json!(eq.mid.to_string()));
             settings.insert("eq-high".to_string(), json!(eq.high.to_string()));
         }
-        let mut device = json!({ "mac": mac, "settings": settings });
+        let mut device = json!({ "mac": mac, "settings": settings, "audio": audio });
         if let Some(head) = head {
             device["head"] = head;
         }
@@ -428,6 +473,27 @@ mod tests {
         assert_eq!(help["settings"]["chime-volume"], "0-100");
         assert_eq!(help["settings"]["eq-mid"], "0-100");
         assert_eq!(help["commands"]["head-tracking"], "on|off");
+    }
+
+    const LAPTOP: &str = "30:03:C8:2C:B2:06";
+    const PHONE: &str = "F8:C3:CC:43:EE:1E";
+
+    #[test]
+    fn audio_owner_follows_source_and_connected_devices() {
+        let only = |m: &str| vec![m.to_string()];
+        // Laptop took the AirPods back: it is the source and the only connection.
+        assert_eq!(audio_owner(Some(LAPTOP), Some(LAPTOP), &only(LAPTOP)), "this-device");
+        // Case-insensitive address match.
+        assert_eq!(
+            audio_owner(Some(LAPTOP), Some(&LAPTOP.to_lowercase()), &only(LAPTOP)),
+            "this-device"
+        );
+        // Phone took over: no source for us and only the phone is connected.
+        assert_eq!(audio_owner(Some(LAPTOP), None, &only(PHONE)), "other-device");
+        // Connected to the laptop but nothing playing.
+        assert_eq!(audio_owner(Some(LAPTOP), None, &only(LAPTOP)), "none");
+        assert_eq!(audio_owner(Some(LAPTOP), None, &[]), "none");
+        assert_eq!(audio_owner(None, Some(LAPTOP), &only(LAPTOP)), "unknown");
     }
 
     const REPORTED_EQ: CustomEq = CustomEq {
