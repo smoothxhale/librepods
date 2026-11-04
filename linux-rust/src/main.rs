@@ -14,7 +14,7 @@ use crate::ui::messages::BluetoothUIMessage;
 use crate::ui::tray::MyTray;
 use crate::utils::{ensure_device_registered, get_app_settings_path, get_devices_path};
 use bluer::{Address, InternalErrorKind};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use dbus::arg::{RefArg, Variant};
 use dbus::blocking::Connection;
 use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
@@ -30,6 +30,16 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 #[derive(Parser)]
+#[command(
+    name = "librepods",
+    about = "AirPods companion: run without a command to start the app, or use a command to \
+             read and change the running instance",
+    after_help = "Examples:\n  librepods info\n  librepods get press-speed\n  \
+                  librepods set press-speed slower eq-mid 50\n  librepods eq 75 35 75\n  \
+                  librepods export > pods.json && librepods apply pods.json\n\n\
+                  `librepods COMMAND --help` explains each command; `librepods settings` lists \
+                  every setting.\nTab completion: librepods completions zsh --help"
+)]
 struct Args {
     #[arg(long, short = 'd', help = "Enable debug logging")]
     debug: bool,
@@ -47,26 +57,10 @@ struct Args {
     le_debug: bool,
     #[arg(long, short = 'v', help = "Show application version and exit")]
     version: bool,
+    #[arg(long, global = true, help = "Machine-readable JSON output for commands")]
+    json: bool,
     #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Query or change the running instance: `status`, `info`, `settings`,
-    /// `set <setting> <value>` (e.g. `set press-speed slower`, `set eq-mid 50`),
-    /// `head-tracking on|off`, `rename <name>`, `packets [clear|<opcode>]`
-    Ctl {
-        #[arg(required = true, num_args = 1..)]
-        request: Vec<String>,
-    },
-    /// Show everything known about the connected AirPods: identity, firmware,
-    /// battery, audio, microphone, EQ and settings
-    Info {
-        /// Print the raw JSON instead of the readable report
-        #[arg(long)]
-        json: bool,
-    },
+    command: Option<control::cli::Command>,
 }
 
 fn main() -> iced::Result {
@@ -80,39 +74,8 @@ fn main() -> iced::Result {
         return Ok(());
     }
 
-    if let Some(Command::Info { json }) = &args.command {
-        match control::server::request("info") {
-            Ok(reply) if *json => println!("{reply}"),
-            Ok(reply) => match serde_json::from_str::<serde_json::Value>(&reply) {
-                Ok(value) if value["ok"] == true => {
-                    print!("{}", control::report::format_info(&value, control::report::bluetooth_codec));
-                }
-                _ => {
-                    eprintln!("{reply}");
-                    std::process::exit(1);
-                }
-            },
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-        }
-        std::process::exit(0);
-    }
-
-    if let Some(Command::Ctl { request }) = &args.command {
-        match control::server::request(&request.join(" ")) {
-            Ok(reply) => {
-                println!("{reply}");
-                let ok = serde_json::from_str::<serde_json::Value>(&reply)
-                    .is_ok_and(|v| v["ok"] == true);
-                std::process::exit(if ok { 0 } else { 1 });
-            }
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-        }
+    if let Some(command) = &args.command {
+        std::process::exit(control::cli::run(command, args.json));
     }
 
     let log_level = if args.debug { "debug" } else { "info" };

@@ -21,7 +21,7 @@ use crate::bluetooth::aacp_extras::{CustomEq, EQ_BAND_MAX, NAME_MAX_BYTES, valid
 use crate::control::report::model_name;
 use crate::devices::enums::DeviceInformation;
 use crate::bluetooth::managers::DeviceManagers;
-use crate::control::settings::Setting;
+use crate::control::settings::{AppSetting, Setting, all_settings, parse_toggle, validate};
 
 /// Bluetooth address of this computer's adapter, looked up once at startup; used to
 /// tell whether this computer or another device is using the AirPods.
@@ -126,6 +126,9 @@ async fn respond(request: &str, managers: &Managers) -> Value {
         ["info"] => info(managers).await,
         ["settings"] => settings_help(),
         ["set", name, value] if name.starts_with("eq") => set_eq(managers, name, value).await,
+        ["set", name, value] if AppSetting::from_name(name).is_some() => {
+            set_app(managers, name, value).await
+        }
         ["set", name, value] => set(managers, name, value).await,
         ["head-tracking", state] => head_tracking(managers, state).await,
         ["rename", name @ ..] if !name.is_empty() => rename(managers, &name.join(" ")).await,
@@ -207,20 +210,19 @@ where
     Ok(applied)
 }
 
-/// New custom EQ after applying `eq on|off` or `eq-low|eq-mid|eq-high 0-100`.
+/// New custom EQ after applying `eq on|off` or `eq-low|eq-mid|eq-high 0..100`.
 fn apply_eq(current: CustomEq, name: &str, value: &str) -> Result<CustomEq, String> {
     let band = || {
         value
             .parse::<u8>()
             .ok()
             .filter(|v| *v <= EQ_BAND_MAX)
-            .ok_or_else(|| format!("{name}: expected 0-{EQ_BAND_MAX}"))
+            .ok_or_else(|| format!("{name}: expected 0..{EQ_BAND_MAX}"))
     };
     Ok(match name {
-        "eq" => match value {
-            "on" => CustomEq { enabled: true, ..current },
-            "off" => CustomEq { enabled: false, ..current },
-            _ => return Err("eq: expected on|off".to_string()),
+        "eq" => match parse_toggle(value) {
+            Some(enabled) => CustomEq { enabled, ..current },
+            None => return Err("eq: expected on|off".to_string()),
         },
         "eq-low" => CustomEq { low: band()?, ..current },
         "eq-mid" => CustomEq { mid: band()?, ..current },
@@ -424,6 +426,20 @@ async fn device_status(mac: &str, aacp: &AACPManager) -> Value {
             settings.insert("eq-mid".to_string(), json!(eq.mid.to_string()));
             settings.insert("eq-high".to_string(), json!(eq.high.to_string()));
         }
+        let app = crate::utils::AppSettings::load();
+        let toggle = |on: bool| json!(if on { "on" } else { "off" });
+        let t = app.hires_mic_agc_tuning;
+        for (name, value) in [
+            ("hires-mic", toggle(aacp.hires_mic_enabled())),
+            ("agc", toggle(app.hires_mic_agc)),
+            ("agc-target", json!(number_text(t.target_dbfs))),
+            ("agc-max-boost", json!(number_text(t.max_gain_db))),
+            ("agc-gate", json!(number_text(t.gate_dbfs))),
+            ("agc-attack", json!(number_text(t.attack_ms))),
+            ("agc-release", json!(number_text(t.release_ms))),
+        ] {
+            settings.insert(name.to_string(), value);
+        }
         let mut device = json!({ "mac": mac, "settings": settings, "audio": audio });
         if let Some(head) = head {
             device["head"] = head;
@@ -433,23 +449,65 @@ async fn device_status(mac: &str, aacp: &AACPManager) -> Value {
 }
 
 fn settings_help() -> Value {
-    let mut settings: Map<String, Value> = Setting::ALL
-        .into_iter()
-        .map(|s| (s.name().to_string(), json!(s.accepted())))
-        .collect();
-    let band = format!("0-{EQ_BAND_MAX}");
-    settings.insert("eq".to_string(), json!("on|off"));
-    for name in ["eq-low", "eq-mid", "eq-high"] {
-        settings.insert(name.to_string(), json!(band));
-    }
+    let specs = all_settings();
+    let settings: Map<String, Value> =
+        specs.iter().map(|s| (s.name.to_string(), json!(s.accepted))).collect();
+    let descriptions: Map<String, Value> =
+        specs.iter().map(|s| (s.name.to_string(), json!(s.about))).collect();
     json!({
         "ok": true,
         "settings": settings,
+        "descriptions": descriptions,
         "commands": {
             "head-tracking": "on|off",
             "rename": format!("<name, up to {NAME_MAX_BYTES} bytes>"),
         },
     })
+}
+
+/// Change one of LibrePods' own settings and save it; the hi-res microphone
+/// switch also takes effect on every connected device immediately.
+async fn set_app(managers: &Managers, name: &str, value: &str) -> Value {
+    let canonical = match validate(name, value) {
+        Ok(v) => v,
+        Err(e) => return error(e),
+    };
+    let Some(setting) = AppSetting::from_name(name) else {
+        return error(format!("unknown setting '{name}'"));
+    };
+    let number = canonical.parse::<f32>().unwrap_or_default();
+    let on = canonical == "on";
+    let mut settings = crate::utils::AppSettings::load();
+    let tuning = &mut settings.hires_mic_agc_tuning;
+    match setting {
+        AppSetting::HiresMic => settings.hires_mic_enabled = on,
+        AppSetting::Agc => settings.hires_mic_agc = on,
+        AppSetting::AgcTarget => tuning.target_dbfs = number,
+        AppSetting::AgcMaxBoost => tuning.max_gain_db = number,
+        AppSetting::AgcGate => tuning.gate_dbfs = number,
+        AppSetting::AgcAttack => tuning.attack_ms = number,
+        AppSetting::AgcRelease => tuning.release_ms = number,
+    }
+    settings.save();
+    if setting == AppSetting::HiresMic {
+        let managers = managers.read().await;
+        for manager in managers.values() {
+            if let Some(aacp) = manager.get_aacp() {
+                aacp.set_hires_mic_enabled(on).await;
+            }
+        }
+    }
+    info!("control socket: set {name} = {canonical}");
+    json!({ "ok": true, "setting": name, "value": canonical })
+}
+
+/// Number as text without a trailing ".0" when it is whole.
+fn number_text(v: f32) -> String {
+    if v.fract() == 0.0 {
+        format!("{}", v as i64)
+    } else {
+        format!("{v}")
+    }
 }
 
 async fn set(managers: &Managers, name: &str, value: &str) -> Value {
@@ -549,8 +607,8 @@ mod tests {
     async fn status_and_settings_succeed_without_devices() {
         assert_eq!(respond("status", &empty()).await["devices"], json!([]));
         let help = respond("settings", &empty()).await;
-        assert_eq!(help["settings"]["chime-volume"], "0-100");
-        assert_eq!(help["settings"]["eq-mid"], "0-100");
+        assert_eq!(help["settings"]["chime-volume"], "0..100");
+        assert_eq!(help["settings"]["eq-mid"], "0..100");
         assert_eq!(help["commands"]["head-tracking"], "on|off");
     }
 
@@ -603,7 +661,7 @@ mod tests {
         assert!(respond("set eq-mid 500", &m).await["error"]
             .as_str()
             .unwrap()
-            .contains("0-100"));
+            .contains("0..100"));
         assert!(respond("head-tracking sideways", &m).await["error"]
             .as_str()
             .unwrap()
