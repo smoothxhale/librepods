@@ -228,6 +228,22 @@ impl HeadTracker {
     }
 }
 
+/// Text fields of a device-information packet (opcode 0x1D), in order: name,
+/// model number, manufacturer, serial number, two firmware versions, hardware
+/// revision, updater identifier, left and right bud serial numbers, and further
+/// version fields. `data` starts after the opcode and its two flag bytes; a short
+/// binary prefix ends at the first zero byte. Empty and non-UTF-8 fields are
+/// skipped.
+pub fn information_strings(data: &[u8]) -> Vec<String> {
+    let start = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+    data[start..]
+        .split(|&b| b == 0)
+        .filter(|field| !field.is_empty())
+        .filter_map(|field| std::str::from_utf8(field).ok())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Packets kept by `PacketLog`; older ones are dropped first.
 pub const PACKET_LOG_CAPACITY: usize = 256;
 
@@ -411,6 +427,28 @@ mod tests {
             tracker.process(&[0u8; 81]);
         }
         assert!(tracker.calibrating());
+    }
+
+    #[test]
+    fn information_strings_start_with_the_device_name() {
+        // Layout as captured from AirPods 4: binary prefix, then zero-separated
+        // fields including an undecodable binary field.
+        let mut data = vec![0x01, 0x04, 0x00];
+        for field in [
+            &b"My AirPods"[..],
+            b"A3053",
+            b"Apple Inc.",
+            b"SERIAL0001",
+            &[0x80, 0xff, 0x41][..],
+            b"1.0.0",
+        ] {
+            data.extend_from_slice(field);
+            data.push(0x00);
+        }
+        assert_eq!(
+            information_strings(&data),
+            ["My AirPods", "A3053", "Apple Inc.", "SERIAL0001", "1.0.0"]
+        );
     }
 
     #[test]

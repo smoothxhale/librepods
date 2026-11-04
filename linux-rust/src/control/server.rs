@@ -18,6 +18,8 @@ use tokio::sync::RwLock;
 
 use crate::bluetooth::aacp::{AACPManager, ControlCommandStatus};
 use crate::bluetooth::aacp_extras::{CustomEq, EQ_BAND_MAX, NAME_MAX_BYTES, validate_name};
+use crate::control::report::model_name;
+use crate::devices::enums::DeviceInformation;
 use crate::bluetooth::managers::DeviceManagers;
 use crate::control::settings::Setting;
 
@@ -121,6 +123,7 @@ async fn respond(request: &str, managers: &Managers) -> Value {
     let words: Vec<&str> = request.split_whitespace().collect();
     match words.as_slice() {
         ["status"] => status(managers).await,
+        ["info"] => info(managers).await,
         ["settings"] => settings_help(),
         ["set", name, value] if name.starts_with("eq") => set_eq(managers, name, value).await,
         ["set", name, value] => set(managers, name, value).await,
@@ -133,7 +136,7 @@ async fn respond(request: &str, managers: &Managers) -> Value {
             None => error("packets: expected an opcode such as 0x55"),
         },
         _ => error(
-            "usage: status | settings | set <setting> <value> | head-tracking on|off | \
+            "usage: status | info | settings | set <setting> <value> | head-tracking on|off | \
              rename <name> | packets [clear|<opcode>]",
         ),
     }
@@ -300,9 +303,86 @@ async fn status(managers: &Managers) -> Value {
     let managers = managers.read().await;
     let mut devices = Vec::new();
     for (mac, manager) in managers.iter() {
-        let Some(aacp) = manager.get_aacp() else {
-            continue;
-        };
+        if let Some(aacp) = manager.get_aacp() {
+            devices.push(device_status(mac, &aacp).await);
+        }
+    }
+    json!({ "ok": true, "devices": devices })
+}
+
+/// `status` plus identity, battery, ear state and hi-res microphone details.
+async fn info(managers: &Managers) -> Value {
+    let managers = managers.read().await;
+    let mut devices = Vec::new();
+    for (mac, manager) in managers.iter() {
+        if let Some(aacp) = manager.get_aacp() {
+            let mut device = device_status(mac, &aacp).await;
+            if let (Some(obj), Value::Object(details)) =
+                (device.as_object_mut(), device_details(mac, &aacp).await)
+            {
+                obj.extend(details);
+            }
+            devices.push(device);
+        }
+    }
+    json!({ "ok": true, "devices": devices })
+}
+
+async fn device_details(mac: &str, aacp: &AACPManager) -> Value {
+    let state = aacp.state.lock().await;
+    // Fields are copied one by one: the stored record also holds the device's
+    // proximity keys, which must never appear in output.
+    let identity = match state.devices.get(mac).and_then(|d| d.information.as_ref()) {
+        Some(DeviceInformation::AirPods(i)) => json!({
+            "name": i.name,
+            "model_number": i.model_number,
+            "model": model_name(&i.model_number),
+            "manufacturer": i.manufacturer,
+            "serial_number": i.serial_number,
+            "left_serial_number": i.left_serial_number,
+            "right_serial_number": i.right_serial_number,
+            "firmware": [i.version1, i.version2],
+            "hardware_revision": i.hardware_revision,
+        }),
+        _ => Value::Null,
+    };
+    let battery: Vec<Value> = state
+        .battery_info
+        .iter()
+        .map(|b| {
+            json!({
+                "component": format!("{:?}", b.component).to_lowercase(),
+                "level": b.level,
+                "status": format!("{:?}", b.status),
+            })
+        })
+        .collect();
+    let ears: Vec<String> = state
+        .ear_detection_status
+        .iter()
+        .map(|e| format!("{e:?}"))
+        .collect();
+    drop(state);
+
+    let mic = aacp.mic_status();
+    let settings = crate::utils::AppSettings::load();
+    json!({
+        "identity": identity,
+        "battery": battery,
+        "ears": ears,
+        "hires_mic": {
+            "enabled": aacp.hires_mic_enabled(),
+            "active": mic.active(),
+            "recorder": mic.app(),
+            "level": tenths(mic.level()),
+            "agc": settings.hires_mic_agc,
+            "agc_tuning": settings.hires_mic_agc_tuning,
+        },
+    })
+}
+
+async fn device_status(mac: &str, aacp: &AACPManager) -> Value {
+    {
         let (reported, custom_eq, head, audio) = {
             let state = aacp.state.lock().await;
             let source = state
@@ -348,9 +428,8 @@ async fn status(managers: &Managers) -> Value {
         if let Some(head) = head {
             device["head"] = head;
         }
-        devices.push(device);
+        device
     }
-    json!({ "ok": true, "devices": devices })
 }
 
 fn settings_help() -> Value {

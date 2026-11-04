@@ -53,11 +53,19 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Query or change the running instance: `status`, `settings`,
-    /// or `set <setting> <value>` (for example `set press-speed slower`)
+    /// Query or change the running instance: `status`, `info`, `settings`,
+    /// `set <setting> <value>` (e.g. `set press-speed slower`, `set eq-mid 50`),
+    /// `head-tracking on|off`, `rename <name>`, `packets [clear|<opcode>]`
     Ctl {
         #[arg(required = true, num_args = 1..)]
         request: Vec<String>,
+    },
+    /// Show everything known about the connected AirPods: identity, firmware,
+    /// battery, audio, microphone, EQ and settings
+    Info {
+        /// Print the raw JSON instead of the readable report
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -70,6 +78,26 @@ fn main() -> iced::Result {
             env!("CARGO_PKG_VERSION")
         );
         return Ok(());
+    }
+
+    if let Some(Command::Info { json }) = &args.command {
+        match control::server::request("info") {
+            Ok(reply) if *json => println!("{reply}"),
+            Ok(reply) => match serde_json::from_str::<serde_json::Value>(&reply) {
+                Ok(value) if value["ok"] == true => {
+                    print!("{}", control::report::format_info(&value, control::report::bluetooth_codec));
+                }
+                _ => {
+                    eprintln!("{reply}");
+                    std::process::exit(1);
+                }
+            },
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        std::process::exit(0);
     }
 
     if let Some(Command::Ctl { request }) = &args.command {

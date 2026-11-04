@@ -1,5 +1,6 @@
 use crate::bluetooth::aacp_extras::{
     CustomEq, HEAD_TRACKING_START, HEAD_TRACKING_STOP, HeadTracker, PacketLog,
+    information_strings,
 };
 use crate::devices::airpods::AirPodsInformation;
 use crate::devices::enums::{DeviceData, DeviceInformation, DeviceType};
@@ -491,6 +492,11 @@ impl AACPManager {
         &self.runtime
     }
 
+    /// Live state of the hi-res microphone capture (activity, recorder, level).
+    pub fn mic_status(&self) -> crate::audio::hires_mic::MicStatus {
+        self.mic_status.clone()
+    }
+
     pub fn hires_mic_enabled(&self) -> bool {
         self.hires_enabled.load(Ordering::Relaxed)
     }
@@ -838,29 +844,7 @@ impl AACPManager {
                     error!("Information packet too short: {}", hex::encode(payload));
                     return;
                 }
-                let data = &payload[4..];
-                let mut index = 0;
-                while index < data.len() && data[index] != 0x00 {
-                    index += 1;
-                }
-                let mut strings = Vec::new();
-                while index < data.len() {
-                    while index < data.len() && data[index] == 0x00 {
-                        index += 1;
-                    }
-                    if index >= data.len() {
-                        break;
-                    }
-                    let start = index;
-                    while index < data.len() && data[index] != 0x00 {
-                        index += 1;
-                    }
-                    let str_bytes = &data[start..index];
-                    if let Ok(s) = std::str::from_utf8(str_bytes) {
-                        strings.push(s.to_string());
-                    }
-                }
-                strings.remove(0);
+                let strings = information_strings(&payload[4..]);
                 let info = AirPodsInformation {
                     name: strings.first().cloned().unwrap_or_default(),
                     model_number: strings.get(1).cloned().unwrap_or_default(),
