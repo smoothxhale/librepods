@@ -18,10 +18,10 @@ use tokio::sync::RwLock;
 
 use crate::bluetooth::aacp::{AACPManager, ControlCommandStatus};
 use crate::bluetooth::aacp_extras::{CustomEq, EQ_BAND_MAX, NAME_MAX_BYTES, validate_name};
-use crate::control::report::model_name;
-use crate::devices::enums::DeviceInformation;
 use crate::bluetooth::managers::DeviceManagers;
+use crate::control::report::model_name;
 use crate::control::settings::{AppSetting, Setting, all_settings, parse_toggle, validate};
+use crate::devices::enums::DeviceInformation;
 
 /// Bluetooth address of this computer's adapter, looked up once at startup; used to
 /// tell whether this computer or another device is using the AirPods.
@@ -57,7 +57,9 @@ type Managers = Arc<RwLock<HashMap<String, DeviceManagers>>>;
 
 pub fn socket_path() -> PathBuf {
     let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(runtime).join("librepods").join("control.sock")
+    PathBuf::from(runtime)
+        .join("librepods")
+        .join("control.sock")
 }
 
 /// Accept control connections until the process exits.
@@ -181,7 +183,11 @@ async fn packets(managers: &Managers, opcode: Option<u8>, clear: bool) -> Value 
 
 /// Run `action` on every connected device's AACP manager, returning the MACs it
 /// succeeded on, or an error when none did.
-async fn for_each_device<F, Fut>(managers: &Managers, what: &str, action: F) -> Result<Vec<String>, String>
+async fn for_each_device<F, Fut>(
+    managers: &Managers,
+    what: &str,
+    action: F,
+) -> Result<Vec<String>, String>
 where
     F: Fn(Arc<AACPManager>) -> Fut,
     Fut: std::future::Future<Output = Result<(), String>>,
@@ -224,29 +230,53 @@ fn apply_eq(current: CustomEq, name: &str, value: &str) -> Result<CustomEq, Stri
             Some(enabled) => CustomEq { enabled, ..current },
             None => return Err("eq: expected on|off".to_string()),
         },
-        "eq-low" => CustomEq { low: band()?, ..current },
-        "eq-mid" => CustomEq { mid: band()?, ..current },
-        "eq-high" => CustomEq { high: band()?, ..current },
-        _ => return Err(format!("unknown setting '{name}'; run 'settings' for the list")),
+        "eq-low" => CustomEq {
+            low: band()?,
+            ..current
+        },
+        "eq-mid" => CustomEq {
+            mid: band()?,
+            ..current
+        },
+        "eq-high" => CustomEq {
+            high: band()?,
+            ..current
+        },
+        _ => {
+            return Err(format!(
+                "unknown setting '{name}'; run 'settings' for the list"
+            ));
+        }
     })
 }
 
 async fn set_eq(managers: &Managers, name: &str, value: &str) -> Value {
     // Validate against a neutral EQ first so bad input never reaches a device.
-    let neutral = CustomEq { enabled: true, low: 50, mid: 50, high: 50 };
+    let neutral = CustomEq {
+        enabled: true,
+        low: 50,
+        mid: 50,
+        high: 50,
+    };
     if let Err(e) = apply_eq(neutral, name, value) {
         return error(e);
     }
-    let result = for_each_device(managers, &format!("set {name} = {value}"), |aacp| async move {
-        let current = aacp
-            .state
-            .lock()
-            .await
-            .custom_eq
-            .ok_or("device has not reported a custom EQ")?;
-        let updated = apply_eq(current, name, value)?;
-        aacp.send_custom_eq(updated).await.map_err(|e| e.to_string())
-    })
+    let result = for_each_device(
+        managers,
+        &format!("set {name} = {value}"),
+        |aacp| async move {
+            let current = aacp
+                .state
+                .lock()
+                .await
+                .custom_eq
+                .ok_or("device has not reported a custom EQ")?;
+            let updated = apply_eq(current, name, value)?;
+            aacp.send_custom_eq(updated)
+                .await
+                .map_err(|e| e.to_string())
+        },
+    )
     .await;
     match result {
         Ok(applied) => json!({ "ok": true, "setting": name, "value": value, "applied": applied }),
@@ -260,14 +290,18 @@ async fn head_tracking(managers: &Managers, state: &str) -> Value {
         "off" => false,
         _ => return error("head-tracking: expected on|off"),
     };
-    let result = for_each_device(managers, &format!("head-tracking {state}"), |aacp| async move {
-        let sent = if start {
-            aacp.start_head_tracking().await
-        } else {
-            aacp.stop_head_tracking().await
-        };
-        sent.map_err(|e| e.to_string())
-    })
+    let result = for_each_device(
+        managers,
+        &format!("head-tracking {state}"),
+        |aacp| async move {
+            let sent = if start {
+                aacp.start_head_tracking().await
+            } else {
+                aacp.stop_head_tracking().await
+            };
+            sent.map_err(|e| e.to_string())
+        },
+    )
     .await;
     match result {
         Ok(applied) => json!({ "ok": true, "head-tracking": state, "applied": applied }),
@@ -282,7 +316,11 @@ async fn rename(managers: &Managers, name: &str) -> Value {
     };
     let result = for_each_device(managers, &format!("rename to '{name}'"), |aacp| {
         let name = name.clone();
-        async move { aacp.send_rename_packet(&name).await.map_err(|e| e.to_string()) }
+        async move {
+            aacp.send_rename_packet(&name)
+                .await
+                .map_err(|e| e.to_string())
+        }
     })
     .await;
     match result {
@@ -392,8 +430,11 @@ async fn device_status(mac: &str, aacp: &AACPManager) -> Value {
                 .as_ref()
                 .map(|s| s.mac.clone())
                 .filter(|m| m != "00:00:00:00:00:00");
-            let connected: Vec<String> =
-                state.connected_devices.iter().map(|d| d.mac.clone()).collect();
+            let connected: Vec<String> = state
+                .connected_devices
+                .iter()
+                .map(|d| d.mac.clone())
+                .collect();
             let owner = audio_owner(
                 LOCAL_ADDRESS.get().map(String::as_str),
                 source.as_deref(),
@@ -409,7 +450,12 @@ async fn device_status(mac: &str, aacp: &AACPManager) -> Value {
                 }),
                 None => json!({ "calibrating": t.calibrating() }),
             });
-            (state.control_command_status_list.clone(), state.custom_eq, head, audio)
+            (
+                state.control_command_status_list.clone(),
+                state.custom_eq,
+                head,
+                audio,
+            )
         };
         let mut settings: Map<String, Value> = Setting::ALL
             .into_iter()
@@ -417,11 +463,19 @@ async fn device_status(mac: &str, aacp: &AACPManager) -> Value {
                 reported
                     .iter()
                     .find(|r| r.identifier == setting.identifier())
-                    .map(|r| (setting.name().to_string(), json!(setting.describe(&r.value))))
+                    .map(|r| {
+                        (
+                            setting.name().to_string(),
+                            json!(setting.describe(&r.value)),
+                        )
+                    })
             })
             .collect();
         if let Some(eq) = custom_eq {
-            settings.insert("eq".to_string(), json!(if eq.enabled { "on" } else { "off" }));
+            settings.insert(
+                "eq".to_string(),
+                json!(if eq.enabled { "on" } else { "off" }),
+            );
             settings.insert("eq-low".to_string(), json!(eq.low.to_string()));
             settings.insert("eq-mid".to_string(), json!(eq.mid.to_string()));
             settings.insert("eq-high".to_string(), json!(eq.high.to_string()));
@@ -450,10 +504,14 @@ async fn device_status(mac: &str, aacp: &AACPManager) -> Value {
 
 fn settings_help() -> Value {
     let specs = all_settings();
-    let settings: Map<String, Value> =
-        specs.iter().map(|s| (s.name.to_string(), json!(s.accepted))).collect();
-    let descriptions: Map<String, Value> =
-        specs.iter().map(|s| (s.name.to_string(), json!(s.about))).collect();
+    let settings: Map<String, Value> = specs
+        .iter()
+        .map(|s| (s.name.to_string(), json!(s.accepted)))
+        .collect();
+    let descriptions: Map<String, Value> = specs
+        .iter()
+        .map(|s| (s.name.to_string(), json!(s.about)))
+        .collect();
     json!({
         "ok": true,
         "settings": settings,
@@ -512,7 +570,9 @@ fn number_text(v: f32) -> String {
 
 async fn set(managers: &Managers, name: &str, value: &str) -> Value {
     let Some(setting) = Setting::from_name(name) else {
-        return error(format!("unknown setting '{name}'; run 'settings' for the list"));
+        return error(format!(
+            "unknown setting '{name}'; run 'settings' for the list"
+        ));
     };
     let payload = match setting.encode(value) {
         Ok(payload) => payload,
@@ -530,12 +590,20 @@ async fn set(managers: &Managers, name: &str, value: &str) -> Value {
             .await
         {
             Ok(()) => {
-                info!("control socket: set {} = {} on {}", setting.name(), value, mac);
+                info!(
+                    "control socket: set {} = {} on {}",
+                    setting.name(),
+                    value,
+                    mac
+                );
                 // AirPods apply settings without echoing them back, so record the
                 // new value here; the device reports it again on the next connect.
                 let mut state = aacp.state.lock().await;
                 let list = &mut state.control_command_status_list;
-                match list.iter_mut().find(|s| s.identifier == setting.identifier()) {
+                match list
+                    .iter_mut()
+                    .find(|s| s.identifier == setting.identifier())
+                {
                     Some(status) => status.value = payload.clone(),
                     None => list.push(ControlCommandStatus {
                         identifier: setting.identifier(),
@@ -544,7 +612,12 @@ async fn set(managers: &Managers, name: &str, value: &str) -> Value {
                 }
                 applied.push(mac.clone());
             }
-            Err(e) => warn!("control socket: set {} on {} failed: {}", setting.name(), mac, e),
+            Err(e) => warn!(
+                "control socket: set {} on {} failed: {}",
+                setting.name(),
+                mac,
+                e
+            ),
         }
     }
     if applied.is_empty() {
@@ -557,7 +630,10 @@ async fn set(managers: &Managers, name: &str, value: &str) -> Value {
 pub fn request(line: &str) -> Result<String, String> {
     let path = socket_path();
     let mut stream = std::os::unix::net::UnixStream::connect(&path).map_err(|e| {
-        format!("cannot reach LibrePods at {} ({e}); is it running?", path.display())
+        format!(
+            "cannot reach LibrePods at {} ({e}); is it running?",
+            path.display()
+        )
     })?;
     stream
         .set_read_timeout(Some(CLIENT_TIMEOUT))
@@ -600,7 +676,12 @@ mod tests {
     async fn valid_set_without_devices_reports_nothing_applied() {
         let reply = respond("set press-speed slower", &empty()).await;
         assert_eq!(reply["ok"], false);
-        assert!(reply["error"].as_str().unwrap().contains("no connected AirPods"));
+        assert!(
+            reply["error"]
+                .as_str()
+                .unwrap()
+                .contains("no connected AirPods")
+        );
     }
 
     #[tokio::test]
@@ -619,14 +700,20 @@ mod tests {
     fn audio_owner_follows_source_and_connected_devices() {
         let only = |m: &str| vec![m.to_string()];
         // Laptop took the AirPods back: it is the source and the only connection.
-        assert_eq!(audio_owner(Some(LAPTOP), Some(LAPTOP), &only(LAPTOP)), "this-device");
+        assert_eq!(
+            audio_owner(Some(LAPTOP), Some(LAPTOP), &only(LAPTOP)),
+            "this-device"
+        );
         // Case-insensitive address match.
         assert_eq!(
             audio_owner(Some(LAPTOP), Some(&LAPTOP.to_lowercase()), &only(LAPTOP)),
             "this-device"
         );
         // Phone took over: no source for us and only the phone is connected.
-        assert_eq!(audio_owner(Some(LAPTOP), None, &only(PHONE)), "other-device");
+        assert_eq!(
+            audio_owner(Some(LAPTOP), None, &only(PHONE)),
+            "other-device"
+        );
         // Connected to the laptop but nothing playing.
         assert_eq!(audio_owner(Some(LAPTOP), None, &only(LAPTOP)), "none");
         assert_eq!(audio_owner(Some(LAPTOP), None, &[]), "none");
@@ -643,9 +730,21 @@ mod tests {
     #[test]
     fn eq_changes_touch_only_the_named_field() {
         let low = apply_eq(REPORTED_EQ, "eq-low", "20").unwrap();
-        assert_eq!(low, CustomEq { low: 20, ..REPORTED_EQ });
+        assert_eq!(
+            low,
+            CustomEq {
+                low: 20,
+                ..REPORTED_EQ
+            }
+        );
         let off = apply_eq(REPORTED_EQ, "eq", "off").unwrap();
-        assert_eq!(off, CustomEq { enabled: false, ..REPORTED_EQ });
+        assert_eq!(
+            off,
+            CustomEq {
+                enabled: false,
+                ..REPORTED_EQ
+            }
+        );
     }
 
     #[test]
@@ -658,19 +757,25 @@ mod tests {
     #[tokio::test]
     async fn new_commands_validate_before_sending() {
         let m = empty();
-        assert!(respond("set eq-mid 500", &m).await["error"]
-            .as_str()
-            .unwrap()
-            .contains("0..100"));
-        assert!(respond("head-tracking sideways", &m).await["error"]
-            .as_str()
-            .unwrap()
-            .contains("on|off"));
+        assert!(
+            respond("set eq-mid 500", &m).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("0..100")
+        );
+        assert!(
+            respond("head-tracking sideways", &m).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("on|off")
+        );
         let long = format!("rename {}", "x".repeat(NAME_MAX_BYTES + 1));
-        assert!(respond(&long, &m).await["error"]
-            .as_str()
-            .unwrap()
-            .contains("limit"));
+        assert!(
+            respond(&long, &m).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("limit")
+        );
         assert_eq!(respond("rename", &m).await["ok"], false);
     }
 
@@ -680,7 +785,12 @@ mod tests {
         for request in ["set eq on", "head-tracking on", "rename Pods"] {
             let reply = respond(request, &m).await;
             assert_eq!(reply["ok"], false, "{request}");
-            assert!(reply["error"].as_str().unwrap().contains("no connected AirPods"));
+            assert!(
+                reply["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("no connected AirPods")
+            );
         }
     }
 }

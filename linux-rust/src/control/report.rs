@@ -66,11 +66,19 @@ fn battery_line(battery: &Value) -> String {
                 Some("case") => "case",
                 other => other.unwrap_or("?"),
             };
-            let charging = if b["status"] == "Charging" { " (charging)" } else { "" };
+            let charging = if b["status"] == "Charging" {
+                " (charging)"
+            } else {
+                ""
+            };
             format!("{name} {}%{charging}", b["level"])
         })
         .collect();
-    if parts.is_empty() { "unknown".to_string() } else { parts.join("  ") }
+    if parts.is_empty() {
+        "unknown".to_string()
+    } else {
+        parts.join("  ")
+    }
 }
 
 fn audio_line(audio: &Value, codec: Option<&str>) -> String {
@@ -78,7 +86,10 @@ fn audio_line(audio: &Value, codec: Option<&str>) -> String {
         Some("this-device") => "playing from this computer".to_string(),
         Some("other-device") => {
             let others = audio["connected"].as_array().map_or(String::new(), |a| {
-                a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             });
             format!("in use by another device ({others})")
         }
@@ -171,7 +182,11 @@ pub fn format_info(reply: &Value, codec: impl Fn(&str) -> Option<String>) -> Str
             let ears: Vec<&str> = ears.iter().filter_map(Value::as_str).collect();
             row(&mut out, "Ears", ears.join(" / "));
         }
-        row(&mut out, "Audio", audio_line(&d["audio"], codec(mac).as_deref()));
+        row(
+            &mut out,
+            "Audio",
+            audio_line(&d["audio"], codec(mac).as_deref()),
+        );
         row(&mut out, "Microphone", mic_line(&d["hires_mic"]));
         let s = &d["settings"];
         if s["eq"].is_string() {
@@ -179,14 +194,23 @@ pub fn format_info(reply: &Value, codec: impl Fn(&str) -> Option<String>) -> Str
             row(
                 &mut out,
                 "EQ",
-                format!("{} · low {} · mid {} · high {}", band("eq"), band("eq-low"), band("eq-mid"), band("eq-high")),
+                format!(
+                    "{} · low {} · mid {} · high {}",
+                    band("eq"),
+                    band("eq-low"),
+                    band("eq-mid"),
+                    band("eq-high")
+                ),
             );
         }
         row(&mut out, "Settings", settings_line(s));
         let head = match &d["head"] {
             Value::Null => "off".to_string(),
             h if h["calibrating"] == true => "on, calibrating".to_string(),
-            h => format!("on · yaw {} · pitch {} · roll {}", h["yaw"], h["pitch"], h["roll"]),
+            h => format!(
+                "on · yaw {} · pitch {} · roll {}",
+                h["yaw"], h["pitch"], h["roll"]
+            ),
         };
         row(&mut out, "Head tracking", head);
         out.push('\n');
@@ -226,7 +250,10 @@ mod tests {
         let text = format_info(&reply, |_| Some("AAC".to_string()));
         assert!(text.starts_with("Test Pods  (AirPods 4, A3053)\n"));
         assert!(text.contains("L 77%  R 90% (charging)"));
-        assert!(!text.contains("case 0%"), "disconnected components are hidden");
+        assert!(
+            !text.contains("case 0%"),
+            "disconnected components are hidden"
+        );
         assert!(text.contains("playing from this computer · A2DP AAC"));
         assert!(text.contains("hi-res on · idle · AGC off"));
         assert!(text.contains("on · low 75 · mid 35 · high 75"));

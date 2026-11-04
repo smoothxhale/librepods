@@ -44,7 +44,11 @@ fn render(info: &[BatteryInfo]) -> Value {
 pub fn publish(mac: &str, info: &[BatteryInfo]) {
     let dir = state_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        warn!("could not create battery state dir {}: {}", dir.display(), e);
+        warn!(
+            "could not create battery state dir {}: {}",
+            dir.display(),
+            e
+        );
         return;
     }
     let path = state_path(mac);

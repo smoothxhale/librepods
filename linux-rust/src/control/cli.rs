@@ -22,8 +22,10 @@ pub enum Command {
     /// Everything known about the connected AirPods
     Info,
     /// Show one setting's value, or every setting
-    #[command(after_help = "Examples:\n  librepods get\n  librepods get press-speed\n  \
-        librepods --json get\n\nRun `librepods settings` for all setting names.")]
+    #[command(
+        after_help = "Examples:\n  librepods get\n  librepods get press-speed\n  \
+        librepods --json get\n\nRun `librepods settings` for all setting names."
+    )]
     Get {
         /// Setting name, e.g. press-speed (omit to list every setting)
         setting: Option<String>,
@@ -68,8 +70,10 @@ pub enum Command {
     /// Print every writable setting as JSON, ready for `apply`
     Export,
     /// Apply settings from a JSON object, such as one written by `export`
-    #[command(after_help = "Examples:\n  librepods export > pods.json\n  librepods apply pods.json\n  \
-        echo '{\"press-speed\": \"slower\", \"agc\": true}' | librepods apply -")]
+    #[command(
+        after_help = "Examples:\n  librepods export > pods.json\n  librepods apply pods.json\n  \
+        echo '{\"press-speed\": \"slower\", \"agc\": true}' | librepods apply -"
+    )]
     Apply {
         /// JSON file, or - for standard input
         file: Option<String>,
@@ -166,7 +170,10 @@ fn first_device(status: &Value) -> Result<&Value, Failure> {
 }
 
 fn print_json(value: &Value) {
-    println!("{}", serde_json::to_string_pretty(value).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).unwrap_or_default()
+    );
 }
 
 fn settings_table(specs: &[SettingSpec]) -> String {
@@ -521,9 +528,7 @@ fn apply(file: Option<&str>, json: bool) -> CliResult {
     };
     let text = if file == "-" {
         let mut text = String::new();
-        std::io::stdin()
-            .read_to_string(&mut text)
-            .map(|_| text)
+        std::io::stdin().read_to_string(&mut text).map(|_| text)
     } else {
         std::fs::read_to_string(file)
     }
@@ -598,7 +603,12 @@ fn completions(shell: Option<&str>) -> CliResult {
 /// `accepted NAME` prints the accepted-values text.
 fn complete(args: &[String]) {
     let specs = all_settings();
-    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+    match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
         ["settings"] => {
             for s in specs.iter().filter(|s| s.writable) {
                 println!("{}:{} [{}]", s.name, s.about.replace(':', " "), s.accepted);
@@ -700,11 +710,19 @@ mod tests {
 
     #[test]
     fn apply_file_parses_names_and_values() {
-        let pairs = pairs_from_json(r#"{"agc": true, "eq-mid": 50}"#, "test").ok().unwrap();
+        let pairs = pairs_from_json(r#"{"agc": true, "eq-mid": 50}"#, "test")
+            .ok()
+            .unwrap();
         assert!(pairs.contains(&("agc".to_string(), "on".to_string())));
         assert!(pairs.contains(&("eq-mid".to_string(), "50".to_string())));
-        assert!(matches!(pairs_from_json("[1]", "test"), Err(Failure::Usage(_))));
-        assert!(matches!(pairs_from_json(r#"{"agc": null}"#, "test"), Err(Failure::Usage(_))));
+        assert!(matches!(
+            pairs_from_json("[1]", "test"),
+            Err(Failure::Usage(_))
+        ));
+        assert!(matches!(
+            pairs_from_json(r#"{"agc": null}"#, "test"),
+            Err(Failure::Usage(_))
+        ));
     }
 
     #[test]

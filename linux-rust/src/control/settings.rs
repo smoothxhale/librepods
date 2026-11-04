@@ -307,13 +307,21 @@ pub fn validate(name: &str, value: &str) -> Result<String, String> {
             .ok_or_else(|| format!("{name}: expected on|off, got '{value}'"));
     }
     if let Some((lo, hi)) = spec.accepted.split_once("..") {
-        let (lo, hi): (f32, f32) = (lo.parse().unwrap_or(f32::MIN), hi.parse().unwrap_or(f32::MAX));
+        let (lo, hi): (f32, f32) = (
+            lo.parse().unwrap_or(f32::MIN),
+            hi.parse().unwrap_or(f32::MAX),
+        );
         return value
             .parse::<f32>()
             .ok()
             .filter(|v| v.is_finite() && *v >= lo && *v <= hi)
             .map(|_| value.to_string())
-            .ok_or_else(|| format!("{name}: expected a number in {}, got '{value}'", spec.accepted));
+            .ok_or_else(|| {
+                format!(
+                    "{name}: expected a number in {}, got '{value}'",
+                    spec.accepted
+                )
+            });
     }
     if spec.accepted.split('|').any(|choice| choice == value) {
         Ok(value.to_string())
@@ -345,10 +353,20 @@ mod tests {
     #[test]
     fn spec_covers_device_eq_and_app_settings() {
         let names: Vec<&str> = all_settings().iter().map(|s| s.name).collect();
-        for expected in ["press-speed", "eq", "eq-mid", "hires-mic", "agc-target", "uplink-eq"] {
+        for expected in [
+            "press-speed",
+            "eq",
+            "eq-mid",
+            "hires-mic",
+            "agc-target",
+            "uplink-eq",
+        ] {
             assert!(names.contains(&expected), "{expected}");
         }
-        let target = all_settings().into_iter().find(|s| s.name == "agc-target").unwrap();
+        let target = all_settings()
+            .into_iter()
+            .find(|s| s.name == "agc-target")
+            .unwrap();
         assert_eq!(target.accepted, "-30..-3");
     }
 
@@ -357,21 +375,48 @@ mod tests {
         assert_eq!(validate("agc", "yes"), Ok("on".to_string()));
         assert_eq!(validate("eq", "0"), Ok("off".to_string()));
         assert_eq!(validate("agc-target", "-14"), Ok("-14".to_string()));
-        assert_eq!(validate("press-speed", "slowest"), Ok("slowest".to_string()));
-        assert!(validate("agc-target", "-2").unwrap_err().contains("-30..-3"));
+        assert_eq!(
+            validate("press-speed", "slowest"),
+            Ok("slowest".to_string())
+        );
+        assert!(
+            validate("agc-target", "-2")
+                .unwrap_err()
+                .contains("-30..-3")
+        );
         assert!(validate("eq-low", "101").unwrap_err().contains("0..100"));
-        assert!(validate("mic-mode", "middle").unwrap_err().contains("auto|right|left"));
-        assert!(validate("uplink-eq", "1").unwrap_err().contains("read-only"));
-        assert!(validate("volume", "5").unwrap_err().contains("unknown setting"));
+        assert!(
+            validate("mic-mode", "middle")
+                .unwrap_err()
+                .contains("auto|right|left")
+        );
+        assert!(
+            validate("uplink-eq", "1")
+                .unwrap_err()
+                .contains("read-only")
+        );
+        assert!(
+            validate("volume", "5")
+                .unwrap_err()
+                .contains("unknown setting")
+        );
     }
 
     #[test]
     fn toggles_accept_boolean_words() {
         for word in ["on", "true", "yes", "1", "Enable"] {
-            assert_eq!(Setting::SleepDetection.encode(word), Ok(vec![0x01]), "{word}");
+            assert_eq!(
+                Setting::SleepDetection.encode(word),
+                Ok(vec![0x01]),
+                "{word}"
+            );
         }
         for word in ["off", "FALSE", "no", "0", "disabled"] {
-            assert_eq!(Setting::SleepDetection.encode(word), Ok(vec![0x02]), "{word}");
+            assert_eq!(
+                Setting::SleepDetection.encode(word),
+                Ok(vec![0x02]),
+                "{word}"
+            );
         }
         // Non-toggle choices keep their exact words.
         assert!(Setting::MicMode.encode("yes").is_err());

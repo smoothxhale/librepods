@@ -57,14 +57,56 @@ impl CustomEq {
 /// Starts the head-tracking sensor stream (motion service 0x10). The device
 /// answers a request for service 0x0E with a status-3 refusal on AirPods 4.
 pub const HEAD_TRACKING_START: [u8; 23] = [
-    opcodes::HEADTRACKING, 0x00, 0x00, 0x00, 0x10, 0x00, 0x0F, 0x00, 0x08, 0x73, 0x42, 0x0B,
-    0x08, 0x10, 0x10, 0x02, 0x1A, 0x05, 0x01, 0x40, 0x9C, 0x00, 0x00,
+    opcodes::HEADTRACKING,
+    0x00,
+    0x00,
+    0x00,
+    0x10,
+    0x00,
+    0x0F,
+    0x00,
+    0x08,
+    0x73,
+    0x42,
+    0x0B,
+    0x08,
+    0x10,
+    0x10,
+    0x02,
+    0x1A,
+    0x05,
+    0x01,
+    0x40,
+    0x9C,
+    0x00,
+    0x00,
 ];
 
 /// Stops the head-tracking sensor stream (motion service 0x10).
 pub const HEAD_TRACKING_STOP: [u8; 23] = [
-    opcodes::HEADTRACKING, 0x00, 0x00, 0x00, 0x10, 0x00, 0x0F, 0x00, 0x08, 0x75, 0x42, 0x0B,
-    0x08, 0x10, 0x10, 0x02, 0x1A, 0x05, 0x01, 0x00, 0x00, 0x00, 0x00,
+    opcodes::HEADTRACKING,
+    0x00,
+    0x00,
+    0x00,
+    0x10,
+    0x00,
+    0x0F,
+    0x00,
+    0x08,
+    0x75,
+    0x42,
+    0x0B,
+    0x08,
+    0x10,
+    0x10,
+    0x02,
+    0x1A,
+    0x05,
+    0x01,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
 ];
 
 /// Shortest packet that carries a sensor report. The same opcode also carries a
@@ -199,18 +241,38 @@ impl HeadTracker {
         if x == 0 && y == 0 && z == 0 {
             return;
         }
-        let q = Quat::from_xyz(x as f32 / Q15_SCALE, y as f32 / Q15_SCALE, z as f32 / Q15_SCALE);
+        let q = Quat::from_xyz(
+            x as f32 / Q15_SCALE,
+            y as f32 / Q15_SCALE,
+            z as f32 / Q15_SCALE,
+        );
 
         let Some(neutral) = self.neutral else {
             self.calibration.push(q);
             if self.calibration.len() >= CALIBRATION_SAMPLES {
                 let n = self.calibration.len() as f32;
                 let sum = self.calibration.iter().fold(
-                    Quat { w: 0.0, x: 0.0, y: 0.0, z: 0.0 },
-                    |a, s| Quat { w: a.w + s.w, x: a.x + s.x, y: a.y + s.y, z: a.z + s.z },
+                    Quat {
+                        w: 0.0,
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                    |a, s| Quat {
+                        w: a.w + s.w,
+                        x: a.x + s.x,
+                        y: a.y + s.y,
+                        z: a.z + s.z,
+                    },
                 );
                 self.neutral = Some(
-                    Quat { w: sum.w / n, x: sum.x / n, y: sum.y / n, z: sum.z / n }.normalized(),
+                    Quat {
+                        w: sum.w / n,
+                        x: sum.x / n,
+                        y: sum.y / n,
+                        z: sum.z / n,
+                    }
+                    .normalized(),
                 );
             }
             return;
@@ -303,7 +365,10 @@ pub fn validate_name(name: &str) -> Result<&str, String> {
         return Err("name must not be empty".to_string());
     }
     if name.len() > NAME_MAX_BYTES {
-        return Err(format!("name is {} bytes; the limit is {NAME_MAX_BYTES}", name.len()));
+        return Err(format!(
+            "name is {} bytes; the limit is {NAME_MAX_BYTES}",
+            name.len()
+        ));
     }
     if name.chars().any(char::is_control) {
         return Err("name must not contain control characters".to_string());
@@ -345,7 +410,10 @@ mod tests {
 
     #[test]
     fn short_custom_eq_packet_is_rejected() {
-        assert_eq!(CustomEq::parse(&[0x04, 0x00, 0x04, 0x00, 0x63, 0x00, 0x05]), None);
+        assert_eq!(
+            CustomEq::parse(&[0x04, 0x00, 0x04, 0x00, 0x63, 0x00, 0x05]),
+            None
+        );
     }
 
     /// Sensor report of `len` bytes carrying quaternion `q` (vector part, Q15).
@@ -364,7 +432,12 @@ mod tests {
     fn rotation(degrees: f32, ax: f32, ay: f32, az: f32) -> Quat {
         let half = degrees.to_radians() / 2.0;
         let s = half.sin();
-        Quat { w: half.cos(), x: ax * s, y: ay * s, z: az * s }
+        Quat {
+            w: half.cos(),
+            x: ax * s,
+            y: ay * s,
+            z: az * s,
+        }
     }
 
     fn calibrated(neutral: Quat) -> HeadTracker {
