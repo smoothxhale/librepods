@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn state_path_uses_underscored_mac() {
-        let path = state_path("EC:E9:D2:3A:3A:5B");
-        assert!(path.ends_with("librepods/EC_E9_D2_3A_3A_5B.json"));
+        let path = state_path("00:00:5E:00:53:03");
+        assert!(path.ends_with("librepods/00_00_5E_00_53_03.json"));
     }
 }

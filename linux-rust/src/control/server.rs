@@ -612,8 +612,8 @@ mod tests {
         assert_eq!(help["commands"]["head-tracking"], "on|off");
     }
 
-    const LAPTOP: &str = "30:03:C8:2C:B2:06";
-    const PHONE: &str = "F8:C3:CC:43:EE:1E";
+    const LAPTOP: &str = "00:00:5E:00:53:01";
+    const PHONE: &str = "00:00:5E:00:53:02";
 
     #[test]
     fn audio_owner_follows_source_and_connected_devices() {
